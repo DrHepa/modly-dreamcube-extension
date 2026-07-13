@@ -1,0 +1,567 @@
+{
+  "id": "dreamcube",
+  "type": "model",
+  "name": "DreamCube",
+  "displayName": "DreamCube RGB-D Panorama",
+  "version": "0.1.1",
+  "description": "Modly model extension for DreamCube RGB-D cubemap, equirectangular panorama, mesh, and 3DGS scene generation from a front RGB image with optional internal Depth Anything V2 Small auto-depth.",
+  "source": "https://github.com/Yukun-Huang/DreamCube",
+  "author": "DrHepa",
+  "license": {
+    "wrapper": "MIT",
+    "upstream": "Apache-2.0",
+    "weights": "Apache-2.0"
+  },
+  "generator_class": "DreamCubeGenerator",
+  "weight_owner_id": "dreamcube",
+  "hf_repo": "KevinHuang/DreamCube",
+  "download_check": "model_index.json",
+  "vram_gb": 16,
+  "recommended_vram_gb": 24,
+  "tags": [
+    "image-to-3d",
+    "panorama",
+    "rgbd",
+    "cubemap",
+    "diffusion",
+    "3dgs"
+  ],
+  "docs": {
+    "readme": "./README.md",
+    "setup_status": ".modly/setup/setup-status.json",
+    "setup_log": ".modly/setup/logs/setup.log",
+    "upstream_source": ".modly/upstream/DreamCube"
+  },
+  "setup": {
+    "classification": "model-managed-setup",
+    "argv_contract": {
+      "electron": "setup.py '{\"python_exe\":\"...\",\"ext_dir\":\"...\",\"gpu_sm\":86,\"cuda_version\":128}'",
+      "legacy": "setup.py <python_exe> <ext_dir> <gpu_sm> [cuda_version]"
+    },
+    "evidence": {
+      "status_path": ".modly/setup/setup-status.json",
+      "log_path": ".modly/setup/logs/setup.log"
+    },
+    "managed_runtime_cache": {
+      "upstream_source": {
+        "path": ".modly/upstream/DreamCube",
+        "repo_url": "https://github.com/Yukun-Huang/DreamCube.git",
+        "ref": "main",
+        "managed_by_setup": true,
+        "vendor_policy": "runtime-cache-only-not-wrapper-source"
+      },
+      "hf_snapshot": {
+        "repo_id": "KevinHuang/DreamCube",
+        "path": "models/dreamcube/dreamcube",
+        "download_check": "model_index.json",
+        "managed_by_setup": false,
+        "managed_by": "modly-ui/downloader",
+        "setup_downloads_weights": false,
+        "note": "setup.py records the model directory only; DreamCube weights are not downloaded by setup."
+      },
+      "auto_depth": {
+        "repo_id": "depth-anything/Depth-Anything-V2-Small-hf",
+        "default_variant": "vits",
+        "path": ".modly/auto-depth/cache",
+        "managed_by_setup": false,
+        "download_behavior": "lazy runtime download by transformers cache when auto depth is first used",
+        "dependency": "internal-to-dreamcube-extension"
+      }
+    }
+  },
+  "nodes": [
+    {
+      "id": "generate-panorama",
+      "name": "DreamCube Panorama",
+      "capability_id": "image-to-panorama",
+      "description": "Generate an equirectangular RGB panorama PNG from a front RGB image, internal auto-depth or a supplied front depth image, and six directional prompts.",
+      "input": "image",
+      "output": "image",
+      "weight_owner_id": "dreamcube",
+      "hf_repo": "KevinHuang/DreamCube",
+      "download_check": "model_index.json",
+      "params_schema": [
+        {
+          "id": "depth_mode",
+          "label": "Depth Mode",
+          "type": "select",
+          "default": "auto",
+          "required": false,
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (internal DreamCube depth)"
+            },
+            {
+              "value": "manual",
+              "label": "Manual depth image"
+            }
+          ],
+          "tooltip": "Auto generates front depth inside DreamCube with Depth Anything V2 Small. No separate modly-depth-anything extension is required."
+        },
+        {
+          "id": "auto_depth_variant",
+          "label": "Auto Depth Variant",
+          "type": "select",
+          "default": "vits",
+          "required": false,
+          "options": [
+            {
+              "value": "vits",
+              "label": "Depth Anything V2 Small (vits)"
+            }
+          ],
+          "tooltip": "Internal DreamCube auto-depth model: depth-anything/Depth-Anything-V2-Small-hf. Weights are cached under .modly/auto-depth/cache when first used, not during setup."
+        },
+        {
+          "id": "depth_image_path",
+          "label": "Front Depth Image (optional)",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional front-view depth map. In auto mode DreamCube generates depth internally with Depth Anything V2 Small; this does not require the separate modly-depth-anything extension. If supplied in auto mode, this path wins.",
+          "description": "Optional override for internal DreamCube auto-depth."
+        },
+        {
+          "id": "save_input_depth",
+          "label": "Save Generated Input Depth",
+          "type": "select",
+          "default": "true",
+          "required": false,
+          "options": [
+            {
+              "value": "true",
+              "label": "Yes"
+            },
+            {
+              "value": "false",
+              "label": "No"
+            }
+          ],
+          "tooltip": "Save the internally generated front depth sidecar as input_front_depth_auto.png in the DreamCube run folder."
+        },
+        {
+          "id": "prompt_front",
+          "label": "Front Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the front view."
+        },
+        {
+          "id": "prompt_right",
+          "label": "Right Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the right view."
+        },
+        {
+          "id": "prompt_back",
+          "label": "Back Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the back view."
+        },
+        {
+          "id": "prompt_left",
+          "label": "Left Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the left view."
+        },
+        {
+          "id": "prompt_top",
+          "label": "Top Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the upward view."
+        },
+        {
+          "id": "prompt_bottom",
+          "label": "Bottom Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the downward view."
+        },
+        {
+          "id": "num_inference_steps",
+          "label": "Inference Steps",
+          "type": "int",
+          "default": 50,
+          "min": 1,
+          "max": 100,
+          "tooltip": "DreamCube diffusion steps. Upstream default is 50."
+        },
+        {
+          "id": "guidance_scale",
+          "label": "Guidance Scale",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "step": 0.5,
+          "tooltip": "Classifier-free guidance strength. Upstream default is 7.5."
+        },
+        {
+          "id": "normalize_scale",
+          "label": "Depth Normalize Scale",
+          "type": "float",
+          "default": 0.6,
+          "min": 0.05,
+          "max": 5.0,
+          "step": 0.05,
+          "tooltip": "Depth normalization scale passed to DreamCube."
+        },
+        {
+          "id": "pano_to_3d_mode",
+          "label": "Pano-to-3D Mode",
+          "type": "select",
+          "default": "3D from RGB-D Cubemap",
+          "options": [
+            {
+              "value": "3D from RGB-D Cubemap",
+              "label": "3D from RGB-D Cubemap"
+            },
+            {
+              "value": "3D from RGB-D Equirectangular",
+              "label": "3D from RGB-D Equirectangular"
+            }
+          ],
+          "tooltip": "Scene reconstruction mode used when sidecar scene outputs are requested or when using the scene node."
+        },
+        {
+          "id": "output_format",
+          "label": "Output Format",
+          "type": "select",
+          "default": "equirect_rgb_png",
+          "options": [
+            {
+              "value": "equirect_rgb_png",
+              "label": "Equirectangular RGB PNG"
+            }
+          ],
+          "tooltip": "The panorama node returns the generated equirectangular RGB PNG."
+        },
+        {
+          "id": "max_equi_size",
+          "label": "Max Equirectangular 3D Size",
+          "type": "int",
+          "default": 1024,
+          "min": 128,
+          "max": 2048,
+          "tooltip": "Maximum dimension for equirectangular RGB-D sidecar conversion. Use 0 for upstream native size."
+        },
+        {
+          "id": "max_cube_size",
+          "label": "Max Cubemap 3D Size",
+          "type": "int",
+          "default": 256,
+          "min": 64,
+          "max": 512,
+          "tooltip": "Maximum cube face size for cubemap RGB-D sidecar conversion. Use 0 for upstream native size."
+        },
+        {
+          "id": "save_all_outputs",
+          "label": "Save All Outputs",
+          "type": "select",
+          "default": "false",
+          "options": [
+            {
+              "value": "false",
+              "label": "No"
+            },
+            {
+              "value": "true",
+              "label": "Yes"
+            }
+          ],
+          "tooltip": "Save cubemap/depth PNG sidecars in the run output folder."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 2147483647,
+          "tooltip": "Seed passed as a torch.Generator to the DreamCube pipeline. Set -1 for pipeline default randomness."
+        }
+      ]
+    },
+    {
+      "id": "generate-scene",
+      "name": "DreamCube Scene",
+      "capability_id": "image-depth-to-scene",
+      "description": "Generate a navigable 3D scene from a front RGB image, internal auto-depth or a supplied front depth image, and six directional prompts. Returns a scene manifest with a required GLB plus OBJ, 3DGS splat, and RGB-D PNG sidecars.",
+      "input": "image",
+      "output": "scene",
+      "weight_owner_id": "dreamcube",
+      "hf_repo": "KevinHuang/DreamCube",
+      "download_check": "model_index.json",
+      "params_schema": [
+        {
+          "id": "depth_mode",
+          "label": "Depth Mode",
+          "type": "select",
+          "default": "auto",
+          "required": false,
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto (internal DreamCube depth)"
+            },
+            {
+              "value": "manual",
+              "label": "Manual depth image"
+            }
+          ],
+          "tooltip": "Auto generates front depth inside DreamCube with Depth Anything V2 Small. No separate modly-depth-anything extension is required."
+        },
+        {
+          "id": "auto_depth_variant",
+          "label": "Auto Depth Variant",
+          "type": "select",
+          "default": "vits",
+          "required": false,
+          "options": [
+            {
+              "value": "vits",
+              "label": "Depth Anything V2 Small (vits)"
+            }
+          ],
+          "tooltip": "Internal DreamCube auto-depth model: depth-anything/Depth-Anything-V2-Small-hf. Weights are cached under .modly/auto-depth/cache when first used, not during setup."
+        },
+        {
+          "id": "depth_image_path",
+          "label": "Front Depth Image (optional)",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional front-view depth map. In auto mode DreamCube generates depth internally with Depth Anything V2 Small; this does not require the separate modly-depth-anything extension. If supplied in auto mode, this path wins.",
+          "description": "Optional override for internal DreamCube auto-depth."
+        },
+        {
+          "id": "save_input_depth",
+          "label": "Save Generated Input Depth",
+          "type": "select",
+          "default": "true",
+          "required": false,
+          "options": [
+            {
+              "value": "true",
+              "label": "Yes"
+            },
+            {
+              "value": "false",
+              "label": "No"
+            }
+          ],
+          "tooltip": "Save the internally generated front depth sidecar as input_front_depth_auto.png in the DreamCube run folder."
+        },
+        {
+          "id": "prompt_front",
+          "label": "Front Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the front view."
+        },
+        {
+          "id": "prompt_right",
+          "label": "Right Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the right view."
+        },
+        {
+          "id": "prompt_back",
+          "label": "Back Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the back view."
+        },
+        {
+          "id": "prompt_left",
+          "label": "Left Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the left view."
+        },
+        {
+          "id": "prompt_top",
+          "label": "Top Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the upward view."
+        },
+        {
+          "id": "prompt_bottom",
+          "label": "Bottom Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the downward view."
+        },
+        {
+          "id": "num_inference_steps",
+          "label": "Inference Steps",
+          "type": "int",
+          "default": 50,
+          "min": 1,
+          "max": 100,
+          "tooltip": "DreamCube diffusion steps. Upstream default is 50."
+        },
+        {
+          "id": "guidance_scale",
+          "label": "Guidance Scale",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "step": 0.5,
+          "tooltip": "Classifier-free guidance strength. Upstream default is 7.5."
+        },
+        {
+          "id": "normalize_scale",
+          "label": "Depth Normalize Scale",
+          "type": "float",
+          "default": 0.6,
+          "min": 0.05,
+          "max": 5.0,
+          "step": 0.05,
+          "tooltip": "Depth normalization scale passed to DreamCube."
+        },
+        {
+          "id": "pano_to_3d_mode",
+          "label": "Pano-to-3D Mode",
+          "type": "select",
+          "default": "3D from RGB-D Cubemap",
+          "options": [
+            {
+              "value": "3D from RGB-D Cubemap",
+              "label": "3D from RGB-D Cubemap"
+            },
+            {
+              "value": "3D from RGB-D Equirectangular",
+              "label": "3D from RGB-D Equirectangular"
+            }
+          ],
+          "tooltip": "Select whether OBJ and 3DGS sidecars are reconstructed from cubemap RGB-D or equirectangular RGB-D."
+        },
+        {
+          "id": "max_equi_size",
+          "label": "Max Equirectangular 3D Size",
+          "type": "int",
+          "default": 1024,
+          "min": 128,
+          "max": 2048,
+          "tooltip": "Maximum dimension for equirectangular RGB-D to mesh/3DGS conversion. Use 0 for upstream native size."
+        },
+        {
+          "id": "max_cube_size",
+          "label": "Max Cubemap 3D Size",
+          "type": "int",
+          "default": 256,
+          "min": 64,
+          "max": 512,
+          "tooltip": "Maximum cube face size for cubemap RGB-D to mesh/3DGS conversion. Use 0 for upstream native size."
+        },
+        {
+          "id": "mesh_depth_jump_threshold",
+          "label": "Mesh Depth Jump Removal Threshold",
+          "type": "float",
+          "default": 0.2,
+          "min": 0,
+          "max": 5,
+          "step": 0.05,
+          "tooltip": "Remove mesh triangles whose relative depth jump exceeds this value. Set 0 to disable depth-jump removal; triangles touching repaired or invalid depth are always removed."
+        },
+        {
+          "id": "mesh_footprint_ratio_threshold",
+          "label": "Mesh Footprint Ratio Limit",
+          "type": "float",
+          "default": 12,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "advanced": true,
+          "tooltip": "Reject a triangle when any world-space edge exceeds this multiple of its angularly expected footprint at the nearer endpoint. Set 0 to disable this filter."
+        },
+        {
+          "id": "mesh_aspect_ratio_threshold",
+          "label": "Mesh Aspect Ratio Limit",
+          "type": "float",
+          "default": 10,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "advanced": true,
+          "tooltip": "Reject needle or sliver triangles whose normalized aspect ratio exceeds this value; 1 is equilateral. Set 0 to disable this filter."
+        },
+        {
+          "id": "save_all_outputs",
+          "label": "Save All Outputs",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Yes"
+            },
+            {
+              "value": "false",
+              "label": "Only required sidecars"
+            }
+          ],
+          "tooltip": "When enabled, save cubemap RGB/depth visualization sidecars in addition to required equirectangular PNG, OBJ, and 3DGS outputs."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 2147483647,
+          "tooltip": "Seed passed as a torch.Generator to the DreamCube pipeline. Set -1 for pipeline default randomness."
+        }
+      ]
+    }
+  ]
+}

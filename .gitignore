@@ -1,0 +1,46 @@
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments and local installs
+.venv/
+venv/
+env/
+ENV/
+
+# Modly setup/runtime caches
+.modly/
+
+# Generated DreamCube outputs
+outputs/
+output/
+runs/
+results/
+generated/
+dreamcube-*/
+input_front_rgb.png
+input_front_depth_auto.png
+output_*.png
+output_*.obj
+output_*.glb
+output_*.splat
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
