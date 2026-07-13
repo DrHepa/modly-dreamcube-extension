@@ -19,12 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-Third-party notice:
-
-This MIT license applies only to this Modly wrapper/extension. DreamCube
-upstream source and the KevinHuang/DreamCube model weights are separate
-third-party assets licensed under Apache-2.0 by their respective authors:
-
-- DreamCube upstream source: https://github.com/Yukun-Huang/DreamCube
-- DreamCube model weights: https://huggingface.co/KevinHuang/DreamCube

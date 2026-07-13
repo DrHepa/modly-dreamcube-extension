@@ -130,7 +130,7 @@ Version `0.2.0` is planned to add a manual RGB-D cubemap workflow that accepts s
 
 ## License and third-party notices
 
-The Modly wrapper code in this repository is copyright DrHepa and released under the MIT License. See [LICENSE](LICENSE).
+The Modly wrapper code in this repository is copyright DrHepa and released under the MIT License. See [LICENSE](LICENSE). Third-party licensing is documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 DreamCube upstream source and the `KevinHuang/DreamCube` model weights are separate third-party assets licensed under Apache-2.0 by their respective authors. See:
 
