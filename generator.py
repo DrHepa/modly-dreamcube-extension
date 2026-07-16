@@ -52,6 +52,7 @@ if str(EXTENSION_DIR) not in sys.path:
     sys.path.insert(0, str(EXTENSION_DIR))
 
 import dreamcube_mesh
+import dreamcube_manual_cubemap
 
 MANIFEST_PATH = EXTENSION_DIR / "manifest.json"
 SETUP_STATUS_PATH = EXTENSION_DIR / ".modly" / "setup" / "setup-status.json"
@@ -71,7 +72,8 @@ AUTO_DEPTH_CACHE_DIR = EXTENSION_DIR / ".modly" / "auto-depth" / "cache"
 
 PANORAMA_NODE_ID = "generate-panorama"
 SCENE_NODE_ID = "generate-scene"
-NODE_IDS = {PANORAMA_NODE_ID, SCENE_NODE_ID}
+MANUAL_SCENE_NODE_ID = "generate-scene-manual-cubemap"
+NODE_IDS = {PANORAMA_NODE_ID, SCENE_NODE_ID, MANUAL_SCENE_NODE_ID}
 
 PANO_TO_3D_CUBEMAP = "3D from RGB-D Cubemap"
 PANO_TO_3D_EQUIRECTANGULAR = "3D from RGB-D Equirectangular"
@@ -377,6 +379,8 @@ def _normalise_node_id(value: Any) -> str | None:
         return SCENE_NODE_ID
     if lowered.endswith("/" + PANORAMA_NODE_ID) or lowered.endswith(":" + PANORAMA_NODE_ID):
         return PANORAMA_NODE_ID
+    if "manual-cubemap" in lowered or "rgbd-cubemap" in lowered:
+        return MANUAL_SCENE_NODE_ID
     if "scene" in lowered or "mesh" in lowered:
         return SCENE_NODE_ID
     if "panorama" in lowered or "pano" in lowered or "equirect" in lowered:
@@ -652,6 +656,7 @@ class DreamCubeGenerator(BaseGenerator):
             "postprocess_rgb",
             "postprocess_depth",
             "z_distance_to_depth",
+            "depth_to_z_distance",
             "convert_rgbd_equi_to_3dgs",
             "convert_rgbd_cube_to_3dgs",
         )
@@ -703,7 +708,10 @@ class DreamCubeGenerator(BaseGenerator):
             if node_id is not None:
                 return node_id
 
-        output_format = str(params.get("output_format", "")).strip().lower()
+        output_format = str(params.get("output_format", "equirect_rgb_png")).strip().lower()
+        capability = str(params.get("capability_id", "")).strip().lower()
+        if capability == "rgbd-cubemap-to-scene":
+            return MANUAL_SCENE_NODE_ID
         if output_format in {"glb", "obj"}:
             return SCENE_NODE_ID
         return PANORAMA_NODE_ID
@@ -809,12 +817,14 @@ class DreamCubeGenerator(BaseGenerator):
         self,
         run_dir: Path,
         failure: Mapping[str, Any],
+        *,
+        section: str = "mesh_export",
     ) -> None:
         """Persist diagnostics without ever replacing the generation exception."""
 
         try:
             existing_metadata = _read_json_file(run_dir / "run_metadata.json") or {}
-            existing_metadata["mesh_export"] = failure
+            existing_metadata[section] = failure
             self._write_run_metadata(run_dir, existing_metadata)
         except Exception as metadata_error:
             try:
@@ -1081,12 +1091,12 @@ class DreamCubeGenerator(BaseGenerator):
                 maintain_order=True,
             )
             _ = mesh.vertex_normals
-            try:
-                mesh.visual.material = trimesh.visual.material.PBRMaterial(
-                    doubleSided=True
-                )
-            except Exception:
-                pass
+            mesh.visual.material = trimesh.visual.material.PBRMaterial(
+                doubleSided={
+                    "cubemap": False,
+                    "equirectangular": True,
+                }[mesh_stats["mode"]]
+            )
             mesh.export(str(glb_path))
         except Exception as exc:
             diagnostics = self._scene_file_diagnostics(obj_path, glb_path)
@@ -1213,8 +1223,219 @@ class DreamCubeGenerator(BaseGenerator):
 
         depth_mm = np.rint(5000.0 - (normalized * 4000.0)).clip(1000, 5000).astype(np.uint16)
         depth_path = run_dir / "input_front_depth_auto.png"
-        Image.fromarray(depth_mm, mode="I;16").save(depth_path)
+        Image.fromarray(np.asarray(depth_mm, dtype=np.uint16)).save(depth_path)
         return depth_path
+
+
+    def _run_manual_cubemap_inference(
+        self,
+        *,
+        inputs: dreamcube_manual_cubemap.ManualCubemapInputs,
+        prompts: list[str],
+        num_inference_steps: int,
+        guidance_scale: float,
+        normalize_scale: float,
+        max_cube_size: int,
+        seed_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if self._pipe is None or self._app is None:
+            raise RuntimeError("DreamCube pipeline is not loaded.")
+        import numpy as np
+        import torch
+
+        target_size = min(512, max(256, int(max_cube_size)))
+        rgbs, depths_mm = dreamcube_manual_cubemap.resize_for_inference(inputs, target_size)
+        rgb_np = np.stack([np.asarray(image, dtype=np.float32) / 127.5 - 1.0 for image in rgbs], axis=0)
+        radial_np = np.stack([depth.astype(np.float32) for depth in depths_mm], axis=0)[..., None]
+        z_np = self._app.depth_to_z_distance(radial_np, fov_x=90.0, fov_y=90.0).astype(np.float32)
+        device = getattr(self._pipe, "device", "cpu")
+        cube_rgbs = torch.from_numpy(rgb_np).to(device).permute(0, 3, 1, 2).unsqueeze(0).contiguous()
+        cube_depths = torch.from_numpy(z_np).to(device).permute(0, 3, 1, 2).unsqueeze(0).contiguous()
+        cube_masks = torch.zeros_like(cube_depths, dtype=torch.bool)
+        cube_prompts = dreamcube_manual_cubemap.prefixed_prompts(prompts)
+
+        cuda_available = torch.cuda.is_available()
+        autocast_context = torch.amp.autocast("cuda") if cuda_available else contextlib.nullcontext()
+        try:
+            with torch.inference_mode():
+                with autocast_context:
+                    with contextlib.redirect_stdout(sys.stderr):
+                        prediction = self._pipe(
+                            cube_rgbs=cube_rgbs,
+                            cube_depths=cube_depths,
+                            cube_masks=cube_masks,
+                            prompt=cube_prompts,
+                            height=target_size,
+                            width=target_size,
+                            guidance_scale=guidance_scale,
+                            num_inference_steps=num_inference_steps,
+                            output_type="np",
+                            normalize_scale=normalize_scale,
+                            **seed_kwargs,
+                        )
+        except TypeError as exc:
+            if seed_kwargs:
+                raise RuntimeError(
+                    "DreamCube upstream pipeline rejected the seeded torch.Generator. "
+                    "Retry with seed=-1 or update the upstream pipeline to accept generator=."
+                ) from exc
+            raise
+
+        images_pred = prediction.images
+        depths_pred = prediction.depths
+        if images_pred is None or depths_pred is None:
+            raise RuntimeError("DreamCube manual cubemap pipeline returned incomplete predictions.")
+        if hasattr(images_pred, "detach"):
+            images_pred = images_pred.detach().cpu().numpy()
+        if hasattr(depths_pred, "detach"):
+            depths_pred = depths_pred.detach().cpu().numpy()
+        images_pred = (images_pred * 255).round().astype("uint8")
+        images_pred = images_pred.reshape((1, 6, target_size, target_size, images_pred.shape[-1]))
+        depths_pred = depths_pred.reshape((1, 6, target_size, target_size, depths_pred.shape[-1]))
+        diagnostics = {
+            "conditioning_mode": "manual-rgbd-cubemap",
+            "inference_size": [target_size, target_size],
+            "cube_rgbs_shape": list(cube_rgbs.shape),
+            "cube_depths_shape": list(cube_depths.shape),
+            "cube_masks_shape": list(cube_masks.shape),
+            "prompt_prefixes": list(dreamcube_manual_cubemap.OFFICIAL_PROMPT_PREFIXES),
+        }
+        return {"images": images_pred, "depths": depths_pred, "normals": None}, diagnostics
+
+    def _save_output_faces(self, *, outputs: Mapping[str, Any], run_dir: Path) -> dict[str, Any]:
+        from PIL import Image
+        import numpy as np
+
+        images = outputs.get("images_pred")
+        depths = outputs.get("depths_distance")
+        if images is None or depths is None:
+            return {"status": "skipped", "reason": "missing cubemap predictions"}
+        output_dir = run_dir / "output_faces"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        saved: list[str] = []
+        for index, face in enumerate(dreamcube_manual_cubemap.FACE_ORDER):
+            rgb_arr = np.asarray(images[0, index], dtype=np.uint8)
+            depth_arr = np.rint(np.asarray(depths[0, index, ..., 0], dtype=np.float32)).clip(0, 65535).astype(np.uint16)
+            rgb_path = output_dir / f"{face}_rgb.png"
+            depth_path = output_dir / f"{face}_depth_mm.png"
+            Image.fromarray(rgb_arr).save(rgb_path)
+            Image.fromarray(np.asarray(depth_arr, dtype=np.uint16)).save(depth_path)
+            saved.extend([str(rgb_path.relative_to(run_dir)), str(depth_path.relative_to(run_dir))])
+        return {"status": "saved", "files": saved}
+
+    def _generate_manual_cubemap(
+        self,
+        image_bytes: bytes,
+        safe_params: dict[str, Any],
+        defaults: Mapping[str, Any],
+        progress_cb: Callable[..., Any] | None,
+        cancel_event: Any | None,
+    ) -> Path:
+        _raise_if_cancelled(cancel_event)
+        prompts = _resolve_prompts(safe_params)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        run_dir = self.outputs_dir / f"dreamcube-{timestamp}-{uuid.uuid4().hex[:8]}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        num_inference_steps = _safe_int(_param(safe_params, defaults, "num_inference_steps", 50), 50, minimum=1, maximum=100)
+        guidance_scale = _safe_float(_param(safe_params, defaults, "guidance_scale", 7.5), 7.5, minimum=0.0, maximum=20.0)
+        normalize_scale = _safe_float(_param(safe_params, defaults, "normalize_scale", 0.6), 0.6, minimum=0.05, maximum=5.0)
+        max_cube_size = _safe_int(_param(safe_params, defaults, "max_cube_size", 512), 512, minimum=256, maximum=512)
+        mesh_depth_jump_threshold = _safe_float(_param(safe_params, defaults, "mesh_depth_jump_threshold", dreamcube_mesh.DEFAULT_DEPTH_JUMP_THRESHOLD), dreamcube_mesh.DEFAULT_DEPTH_JUMP_THRESHOLD, minimum=0.0, maximum=5.0)
+        mesh_footprint_ratio_threshold = _safe_float(_param(safe_params, defaults, "mesh_footprint_ratio_threshold", dreamcube_mesh.DEFAULT_FOOTPRINT_RATIO_THRESHOLD), dreamcube_mesh.DEFAULT_FOOTPRINT_RATIO_THRESHOLD, minimum=0.0, maximum=100.0)
+        mesh_aspect_ratio_threshold = _safe_float(_param(safe_params, defaults, "mesh_aspect_ratio_threshold", dreamcube_mesh.DEFAULT_ASPECT_RATIO_THRESHOLD), dreamcube_mesh.DEFAULT_ASPECT_RATIO_THRESHOLD, minimum=0.0, maximum=100.0)
+        seed = _safe_int(_param(safe_params, defaults, "seed", -1), -1, minimum=-1, maximum=2_147_483_647)
+
+        try:
+            inputs = dreamcube_manual_cubemap.load_manual_cubemap_inputs(
+                front_rgb_bytes=image_bytes,
+                params=safe_params,
+                outputs_dir=self.outputs_dir,
+            )
+            dreamcube_manual_cubemap.save_input_faces(run_dir, inputs)
+            run_metadata: dict[str, Any] = {
+                "created_at": _utc_now(),
+                "node_id": MANUAL_SCENE_NODE_ID,
+                "output_format": "glb",
+                "conditioning_mode": "manual-rgbd-cubemap",
+                "face_order": list(dreamcube_manual_cubemap.FACE_ORDER),
+                "face_axes": dict(dreamcube_manual_cubemap.FACE_AXES),
+                "input_faces": inputs.source_stats,
+                "seam_metrics_preflight": inputs.seam_metrics,
+                "prompts": dict(zip(PROMPT_FIELDS, prompts)),
+                "reconstruction": {
+                    "mode": PANO_TO_3D_CUBEMAP,
+                    "max_equi_size": None,
+                    "max_cube_size": max_cube_size,
+                    "mesh_depth_jump_threshold": mesh_depth_jump_threshold,
+                    "mesh_footprint_ratio_threshold": mesh_footprint_ratio_threshold,
+                    "mesh_aspect_ratio_threshold": mesh_aspect_ratio_threshold,
+                },
+                "coordinate_frame": _coordinate_frame_payload(),
+                "presentation": _presentation_payload(),
+            }
+            self._write_run_metadata(run_dir, run_metadata)
+
+            _raise_if_cancelled(cancel_event)
+            _progress(progress_cb, 10, "load")
+            self.load()
+            seed_kwargs = self._build_seed_kwargs(seed)
+
+            _raise_if_cancelled(cancel_event)
+            _progress(progress_cb, 25, "infer")
+            predictions, manual_diagnostics = self._run_manual_cubemap_inference(
+                inputs=inputs,
+                prompts=prompts,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                normalize_scale=normalize_scale,
+                max_cube_size=max_cube_size,
+                seed_kwargs=seed_kwargs,
+            )
+
+            _raise_if_cancelled(cancel_event)
+            _progress(progress_cb, 75, "postprocess")
+            outputs = self._save_postprocessed_outputs(predictions=predictions, run_dir=run_dir, save_all_outputs=True)
+            output_faces = self._save_output_faces(outputs=outputs, run_dir=run_dir)
+            post_seams = dreamcube_manual_cubemap.validate_depth_seams({
+                face: outputs["depths_distance"][0, index, ..., 0]
+                for index, face in enumerate(dreamcube_manual_cubemap.FACE_ORDER)
+            })
+
+            _raise_if_cancelled(cancel_event)
+            _progress(progress_cb, 88, "export")
+            mesh_stats: dict[str, Any] | None = None
+            glb_path, mesh_stats = self._export_scene(
+                outputs=outputs,
+                run_dir=run_dir,
+                mode=PANO_TO_3D_CUBEMAP,
+                max_equi_size=None,
+                max_cube_size=max_cube_size,
+                mesh_depth_jump_threshold=mesh_depth_jump_threshold,
+                mesh_footprint_ratio_threshold=mesh_footprint_ratio_threshold,
+                mesh_aspect_ratio_threshold=mesh_aspect_ratio_threshold,
+            )
+            scene_manifest_path = self._write_scene_manifest(run_dir, glb_path)
+            existing_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            existing_metadata.update({
+                "manual_cubemap": manual_diagnostics,
+                "output_faces": output_faces,
+                "seam_metrics_postprocess": post_seams,
+                "primary_output": {"status": "success", "format": "glb", "path": Path(glb_path).name},
+                "mesh_export": {"status": "success", "format": "glb", "path": Path(glb_path).name, "stats": mesh_stats},
+                "scene_manifest": {"status": "success", "path": Path(scene_manifest_path).name},
+            })
+            self._write_run_metadata(run_dir, existing_metadata)
+            _progress(progress_cb, 100, "done")
+            return Path(glb_path)
+        except Exception as exc:
+            _log(f"Manual cubemap generation failed stage=manual-cubemap error={exc}")
+            self._record_failure_metadata(
+                run_dir,
+                {"status": "failed", "stage": "manual-cubemap", "error": str(exc)},
+                section="manual_cubemap",
+            )
+            raise
 
     def _run_inference(
         self,
@@ -1450,6 +1671,9 @@ class DreamCubeGenerator(BaseGenerator):
         _progress(progress_cb, 2, "validate")
         node_id = self._resolve_node_id(safe_params)
         defaults = _schema_defaults(node_id)
+        if node_id == MANUAL_SCENE_NODE_ID:
+            return self._generate_manual_cubemap(image_bytes, safe_params, defaults, progress_cb, cancel_event)
+
         depth_path, prompts = self._validate_request(image_bytes, safe_params)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1482,7 +1706,7 @@ class DreamCubeGenerator(BaseGenerator):
             PANO_TO_3D_MODES,
             PANO_TO_3D_CUBEMAP,
         )
-        output_format = "glb" if node_id == SCENE_NODE_ID else "equirect_rgb_png"
+        output_format = "glb" if node_id in {SCENE_NODE_ID, MANUAL_SCENE_NODE_ID} else "equirect_rgb_png"
         max_equi_size = _max_size(_param(safe_params, defaults, "max_equi_size", 1024), 1024)
         max_cube_size = _max_size(_param(safe_params, defaults, "max_cube_size", 256), 256)
         mesh_depth_jump_threshold = _safe_float(
@@ -1577,7 +1801,7 @@ class DreamCubeGenerator(BaseGenerator):
                 "mesh_aspect_ratio_threshold": mesh_aspect_ratio_threshold,
             },
         }
-        if node_id == SCENE_NODE_ID:
+        if node_id in {SCENE_NODE_ID, MANUAL_SCENE_NODE_ID}:
             run_metadata["coordinate_frame"] = _coordinate_frame_payload()
             run_metadata["presentation"] = _presentation_payload()
         self._write_run_metadata(run_dir, run_metadata)
@@ -1616,6 +1840,12 @@ class DreamCubeGenerator(BaseGenerator):
 
         _raise_if_cancelled(cancel_event)
         _progress(progress_cb, 88, "export")
+        if save_all_outputs:
+            face_outputs = self._save_output_faces(outputs=outputs, run_dir=run_dir)
+            existing_metadata = json.loads((run_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            existing_metadata["output_faces"] = face_outputs
+            self._write_run_metadata(run_dir, existing_metadata)
+
         if node_id == SCENE_NODE_ID:
             mesh_stats: dict[str, Any] | None = None
             try:
@@ -1629,7 +1859,7 @@ class DreamCubeGenerator(BaseGenerator):
                     mesh_footprint_ratio_threshold=mesh_footprint_ratio_threshold,
                     mesh_aspect_ratio_threshold=mesh_aspect_ratio_threshold,
                 )
-                result_path = self._write_scene_manifest(run_dir, glb_path)
+                scene_manifest_path = self._write_scene_manifest(run_dir, glb_path)
             except dreamcube_mesh.MeshExportError as exc:
                 stats = exc.stats if isinstance(exc.stats, Mapping) else {}
                 vertices = stats.get("vertices") if isinstance(stats.get("vertices"), Mapping) else {}
@@ -1678,6 +1908,11 @@ class DreamCubeGenerator(BaseGenerator):
             )
             existing_metadata.update(
                 {
+                    "primary_output": {
+                        "status": "success",
+                        "format": "glb",
+                        "path": Path(glb_path).name,
+                    },
                     "mesh_export": {
                         "status": "success",
                         "format": "glb",
@@ -1686,11 +1921,12 @@ class DreamCubeGenerator(BaseGenerator):
                     },
                     "scene_manifest": {
                         "status": "success",
-                        "path": Path(result_path).name,
+                        "path": Path(scene_manifest_path).name,
                     },
                 }
             )
             self._write_run_metadata(run_dir, existing_metadata)
+            result_path = Path(glb_path)
         else:
             result_path = Path(outputs["equi_rgb_path"])
 

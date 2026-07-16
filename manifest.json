@@ -3,9 +3,9 @@
   "type": "model",
   "name": "DreamCube",
   "displayName": "DreamCube RGB-D Panorama",
-  "version": "0.1.1",
-  "description": "Modly model extension for DreamCube RGB-D cubemap, equirectangular panorama, mesh, and 3DGS scene generation from a front RGB image with optional internal Depth Anything V2 Small auto-depth.",
-  "source": "https://github.com/Yukun-Huang/DreamCube",
+  "version": "0.2.0",
+  "description": "Modly model extension for DreamCube RGB-D panorama, mesh, 3DGS scene generation, and strict manual six-face RGB-D cubemap scene generation.",
+  "source": "https://github.com/DrHepa/modly-dreamcube-extension",
   "author": "DrHepa",
   "license": {
     "wrapper": "MIT",
@@ -48,7 +48,10 @@
         "repo_url": "https://github.com/Yukun-Huang/DreamCube.git",
         "ref": "main",
         "managed_by_setup": true,
-        "vendor_policy": "runtime-cache-only-not-wrapper-source"
+        "vendor_policy": "runtime-cache-only-not-wrapper-source",
+        "commit": "aa04a53c6542581b5b0a6faa575865d2d57b5243",
+        "checkout": "detached",
+        "pinned_revision": "aa04a53c6542581b5b0a6faa575865d2d57b5243"
       },
       "hf_snapshot": {
         "repo_id": "KevinHuang/DreamCube",
@@ -311,9 +314,9 @@
       "id": "generate-scene",
       "name": "DreamCube Scene",
       "capability_id": "image-depth-to-scene",
-      "description": "Generate a navigable 3D scene from a front RGB image, internal auto-depth or a supplied front depth image, and six directional prompts. Returns a scene manifest with a required GLB plus OBJ, 3DGS splat, and RGB-D PNG sidecars.",
+      "description": "Generate a navigable 3D mesh from a front RGB image, internal auto-depth or a supplied front depth image, and six directional prompts. Returns a GLB mesh; scene-manifest.json remains an auxiliary sidecar with OBJ, 3DGS splat, and RGB-D PNG sidecars.",
       "input": "image",
-      "output": "scene",
+      "output": "mesh",
       "weight_owner_id": "dreamcube",
       "hf_repo": "KevinHuang/DreamCube",
       "download_check": "model_index.json",
@@ -551,6 +554,371 @@
             }
           ],
           "tooltip": "When enabled, save cubemap RGB/depth visualization sidecars in addition to required equirectangular PNG, OBJ, and 3DGS outputs."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 2147483647,
+          "tooltip": "Seed passed as a torch.Generator to the DreamCube pipeline. Set -1 for pipeline default randomness."
+        }
+      ]
+    },
+    {
+      "id": "generate-scene-manual-cubemap",
+      "name": "DreamCube Manual RGB-D Cubemap Scene",
+      "capability_id": "rgbd-cubemap-to-scene",
+      "description": "Generate a navigable 3D mesh from six mandatory square 90-degree RGB cubemap faces and six paired single-channel 16-bit PNG radial-depth faces in millimetres. Returns a GLB mesh with scene-manifest.json as an auxiliary sidecar.",
+      "input": "image",
+      "output": "mesh",
+      "weight_owner_id": "dreamcube",
+      "hf_repo": "KevinHuang/DreamCube",
+      "download_check": "model_index.json",
+      "params_schema": [
+        {
+          "id": "rgb_right_path",
+          "label": "Right RGB Image",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Required square 90-degree RGB cubemap face. Front RGB is the normal node image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_back_path",
+          "label": "Back RGB Image",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Required square 90-degree RGB cubemap face. Front RGB is the normal node image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_left_path",
+          "label": "Left RGB Image",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Required square 90-degree RGB cubemap face. Front RGB is the normal node image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_top_path",
+          "label": "Top RGB Image",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Required square 90-degree RGB cubemap face. Front RGB is the normal node image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_bottom_path",
+          "label": "Bottom RGB Image",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Required square 90-degree RGB cubemap face. Front RGB is the normal node image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "depth_front_path",
+          "label": "Front Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "depth_right_path",
+          "label": "Right Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "depth_back_path",
+          "label": "Back Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "depth_left_path",
+          "label": "Left Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "depth_top_path",
+          "label": "Top Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "depth_bottom_path",
+          "label": "Bottom Depth PNG (16-bit mm)",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "16-bit PNG depth",
+              "extensions": [
+                "png"
+              ]
+            }
+          ],
+          "tooltip": "Required single-channel 16-bit PNG radial distance in millimetres, paired to the same cubemap face. 8-bit or colorized depth is rejected."
+        },
+        {
+          "id": "prompt_front",
+          "label": "Front Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the front view."
+        },
+        {
+          "id": "prompt_right",
+          "label": "Right Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the right view."
+        },
+        {
+          "id": "prompt_back",
+          "label": "Back Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the back view."
+        },
+        {
+          "id": "prompt_left",
+          "label": "Left Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the left view."
+        },
+        {
+          "id": "prompt_top",
+          "label": "Top Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the upward view."
+        },
+        {
+          "id": "prompt_bottom",
+          "label": "Bottom Prompt",
+          "type": "string",
+          "default": "",
+          "required": true,
+          "tooltip": "Text prompt for the downward view."
+        },
+        {
+          "id": "num_inference_steps",
+          "label": "Inference Steps",
+          "type": "int",
+          "default": 50,
+          "min": 1,
+          "max": 100,
+          "tooltip": "DreamCube diffusion steps. Upstream default is 50."
+        },
+        {
+          "id": "guidance_scale",
+          "label": "Guidance Scale",
+          "type": "float",
+          "default": 7.5,
+          "min": 0.0,
+          "max": 20.0,
+          "step": 0.5,
+          "tooltip": "Classifier-free guidance strength. Upstream default is 7.5."
+        },
+        {
+          "id": "normalize_scale",
+          "label": "Depth Normalize Scale",
+          "type": "float",
+          "default": 0.6,
+          "min": 0.05,
+          "max": 5.0,
+          "step": 0.05,
+          "tooltip": "Depth normalization scale passed to DreamCube."
+        },
+        {
+          "id": "max_cube_size",
+          "label": "Max Cubemap Size",
+          "type": "int",
+          "default": 512,
+          "min": 256,
+          "max": 512,
+          "tooltip": "Manual cubemap inference size. Inputs are validated at source dimensions, then RGB is quality-resized and depth is nearest-resized to 256..512 so conditioned interiors remain available."
+        },
+        {
+          "id": "mesh_depth_jump_threshold",
+          "label": "Mesh Depth Jump Removal Threshold",
+          "type": "float",
+          "default": 0.2,
+          "min": 0,
+          "max": 5,
+          "step": 0.05,
+          "tooltip": "Remove mesh triangles whose relative depth jump exceeds this value. Set 0 to disable depth-jump removal; triangles touching repaired or invalid depth are always removed."
+        },
+        {
+          "id": "mesh_footprint_ratio_threshold",
+          "label": "Mesh Footprint Ratio Limit",
+          "type": "float",
+          "default": 12,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "advanced": true,
+          "tooltip": "Reject a triangle when any world-space edge exceeds this multiple of its angularly expected footprint at the nearer endpoint. Set 0 to disable this filter."
+        },
+        {
+          "id": "mesh_aspect_ratio_threshold",
+          "label": "Mesh Aspect Ratio Limit",
+          "type": "float",
+          "default": 10,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "advanced": true,
+          "tooltip": "Reject needle or sliver triangles whose normalized aspect ratio exceeds this value; 1 is equilateral. Set 0 to disable this filter."
+        },
+        {
+          "id": "save_all_outputs",
+          "label": "Save All Outputs",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "true",
+              "label": "Yes"
+            }
+          ],
+          "tooltip": "Manual cubemap always saves deterministic input_faces and output_faces sidecars plus equirectangular/dice sidecars."
         },
         {
           "id": "seed",

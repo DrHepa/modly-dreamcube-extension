@@ -17,7 +17,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "manifest.json"
 
-COMMON_PARAM_IDS = {
+GENERATED_COMMON_PARAM_IDS = {
     "depth_mode",
     "auto_depth_variant",
     "depth_image_path",
@@ -36,6 +36,31 @@ COMMON_PARAM_IDS = {
     "max_cube_size",
     "save_all_outputs",
     "seed",
+}
+
+
+MANUAL_IMAGE_PICKER_IDS = {
+    "rgb_right_path",
+    "rgb_back_path",
+    "rgb_left_path",
+    "rgb_top_path",
+    "rgb_bottom_path",
+    "depth_front_path",
+    "depth_right_path",
+    "depth_back_path",
+    "depth_left_path",
+    "depth_top_path",
+    "depth_bottom_path",
+}
+
+MANUAL_FORBIDDEN_PARAM_IDS = {
+    "depth_mode",
+    "auto_depth_variant",
+    "depth_image_path",
+    "save_input_depth",
+    "pano_to_3d_mode",
+    "max_equi_size",
+    "output_format",
 }
 
 PROMPT_PARAM_IDS = {
@@ -123,7 +148,7 @@ def params_by_id(node: dict[str, Any], validator: Validator, node_id: str) -> di
 
 
 def validate_common_params(validator: Validator, node_id: str, params: dict[str, dict[str, Any]]) -> None:
-    missing = sorted(COMMON_PARAM_IDS.difference(params))
+    missing = sorted(GENERATED_COMMON_PARAM_IDS.difference(params))
     if missing:
         validator.fail(f"nodes[{node_id}].params_schema: missing params {', '.join(missing)}")
         return
@@ -193,6 +218,65 @@ def validate_common_params(validator: Validator, node_id: str, params: dict[str,
         validator.fail(f"nodes[{node_id}].save_all_outputs.options: missing {', '.join(missing_save_values)}")
 
 
+
+def validate_manual_params(validator: Validator, node_id: str, params: dict[str, dict[str, Any]]) -> None:
+    missing_pickers = sorted(MANUAL_IMAGE_PICKER_IDS.difference(params))
+    if missing_pickers:
+        validator.fail(f"nodes[{node_id}].params_schema: missing manual image pickers {', '.join(missing_pickers)}")
+    for param_id in sorted(MANUAL_IMAGE_PICKER_IDS):
+        param = params.get(param_id)
+        if not param:
+            continue
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), "string")
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.required", param.get("required"), True)
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.pickerIntent", param.get("pickerIntent"), "image")
+
+    forbidden = sorted(MANUAL_FORBIDDEN_PARAM_IDS.intersection(params))
+    if forbidden:
+        validator.fail(f"nodes[{node_id}].params_schema: manual node must omit {', '.join(forbidden)}")
+
+    for param_id in sorted(PROMPT_PARAM_IDS):
+        param = params.get(param_id)
+        if not param:
+            validator.fail(f"nodes[{node_id}].params_schema: missing {param_id}")
+            continue
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), "string")
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.required", param.get("required"), True)
+
+    numeric_expectations = {
+        "num_inference_steps": ("int", 50, 100),
+        "guidance_scale": ("float", 7.5, 20.0),
+        "normalize_scale": ("float", 0.6, 5.0),
+        "max_cube_size": ("int", 512, 512, 256),
+        "seed": ("int", -1, 2147483647),
+    }
+    for param_id, expectation in numeric_expectations.items():
+        expected_type, expected_default, expected_max = expectation[:3]
+        expected_min = expectation[3] if len(expectation) > 3 else None
+        param = params.get(param_id)
+        if not param:
+            validator.fail(f"nodes[{node_id}].params_schema: missing {param_id}")
+            continue
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), expected_type)
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.default", param.get("default"), expected_default)
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.max", param.get("max"), expected_max)
+        if expected_min is not None:
+            validator.expect_equal(f"nodes[{node_id}].{param_id}.min", param.get("min"), expected_min)
+
+    save_all = params.get("save_all_outputs")
+    if not save_all:
+        validator.fail(f"nodes[{node_id}].params_schema: missing save_all_outputs")
+    else:
+        validator.expect_equal(f"nodes[{node_id}].save_all_outputs.default", save_all.get("default"), "true")
+
+    for param_id, default in {"mesh_depth_jump_threshold": 0.20, "mesh_footprint_ratio_threshold": 12, "mesh_aspect_ratio_threshold": 10}.items():
+        param = params.get(param_id)
+        if not param:
+            validator.fail(f"nodes[{node_id}].params_schema: missing {param_id}")
+            continue
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), "float")
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.default", param.get("default"), default)
+
 def validate_node(
     validator: Validator,
     manifest: dict[str, Any],
@@ -211,6 +295,10 @@ def validate_node(
     if not params:
         return
 
+    if node_id == "generate-scene-manual-cubemap":
+        validate_manual_params(validator, node_id, params)
+        return
+
     validate_common_params(validator, node_id, params)
     output_format = params.get("output_format")
     if expected["output_format_required"]:
@@ -225,7 +313,7 @@ def validate_node(
     elif output_format:
         validator.fail(
             f"nodes[{node_id}].params_schema: output_format must be omitted; "
-            "scene generation always returns a scene manifest with a required GLB"
+            "scene generation returns a GLB mesh; scene-manifest.json is an auxiliary sidecar"
         )
 
     validator.expect_equal(f"nodes[{node_id}].max_equi_size.max", params["max_equi_size"].get("max"), 2048)
@@ -274,9 +362,13 @@ def validate_files(validator: Validator, manifest: dict[str, Any]) -> None:
     elif (ROOT / "setup.py").exists() and not (ROOT / "setup.py").is_file():
         validator.fail("setup.py exists but is not a regular file")
 
-    mesh_path = ROOT / "dreamcube_mesh.py"
-    if not mesh_path.is_file():
-        validator.fail("dreamcube_mesh.py is required as the extension-owned mesh converter")
+    required_runtime_payloads = {
+        "dreamcube_mesh.py": "extension-owned mesh converter",
+        "dreamcube_manual_cubemap.py": "extension-owned manual RGB-D cubemap runtime",
+    }
+    for filename, description in required_runtime_payloads.items():
+        if not (ROOT / filename).is_file():
+            validator.fail(f"{filename} is required as the {description}")
 
     generator_path = ROOT / "generator.py"
     if generator_path.exists() and not generator_path.is_file():
@@ -295,7 +387,7 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
         "id": "dreamcube",
         "type": "model",
         "generator_class": "DreamCubeGenerator",
-        "source": "https://github.com/Yukun-Huang/DreamCube",
+        "source": "https://github.com/DrHepa/modly-dreamcube-extension",
         "hf_repo": "KevinHuang/DreamCube",
         "download_check": "model_index.json",
         "weight_owner_id": "dreamcube",
@@ -303,7 +395,9 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
     for key, expected in root_expectations.items():
         validator.expect_equal(key, manifest.get(key), expected)
 
-    for key in ("name", "displayName", "version", "description"):
+    validator.expect_equal("version", manifest.get("version"), "0.2.0")
+
+    for key in ("name", "displayName", "description"):
         validator.expect_truthy(key, manifest.get(key))
 
     license_info = manifest.get("license")
@@ -330,6 +424,15 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
         if not isinstance(runtime_cache, dict):
             validator.fail("setup.managed_runtime_cache: expected an object")
         else:
+            upstream_source = runtime_cache.get("upstream_source")
+            if not isinstance(upstream_source, dict):
+                validator.fail("setup.managed_runtime_cache.upstream_source: expected an object")
+            else:
+                validator.expect_equal("setup.managed_runtime_cache.upstream_source.repo_url", upstream_source.get("repo_url"), "https://github.com/Yukun-Huang/DreamCube.git")
+                validator.expect_equal("setup.managed_runtime_cache.upstream_source.ref", upstream_source.get("ref"), "main")
+                validator.expect_equal("setup.managed_runtime_cache.upstream_source.commit", upstream_source.get("commit"), "aa04a53c6542581b5b0a6faa575865d2d57b5243")
+                validator.expect_equal("setup.managed_runtime_cache.upstream_source.checkout", upstream_source.get("checkout"), "detached")
+                validator.expect_equal("setup.managed_runtime_cache.upstream_source.pinned_revision", upstream_source.get("pinned_revision"), "aa04a53c6542581b5b0a6faa575865d2d57b5243")
             hf_snapshot = runtime_cache.get("hf_snapshot")
             if isinstance(hf_snapshot, dict):
                 validator.expect_equal("setup.managed_runtime_cache.hf_snapshot.managed_by_setup", hf_snapshot.get("managed_by_setup"), False)
@@ -381,8 +484,16 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
         "generate-scene": {
             "id": "generate-scene",
             "input": "image",
-            "output": "scene",
+            "output": "mesh",
             "capability_id": "image-depth-to-scene",
+            "output_format_required": False,
+            "save_all_default": "true",
+        },
+        "generate-scene-manual-cubemap": {
+            "id": "generate-scene-manual-cubemap",
+            "input": "image",
+            "output": "mesh",
+            "capability_id": "rgbd-cubemap-to-scene",
             "output_format_required": False,
             "save_all_default": "true",
         },

@@ -312,6 +312,18 @@ class DreamCubeGeneratorContractTests(unittest.TestCase):
             self.assertEqual(instance._resolve_node_id({}), gen.SCENE_NODE_ID)
             self.assertEqual(instance._resolve_node_id({"output_format": "glb"}), gen.SCENE_NODE_ID)
 
+    def test_node_id_resolution_defaults_to_panorama_and_explicit_glb_to_scene(self):
+        gen = self.generator
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            instance = gen.DreamCubeGenerator(root / "models" / "dreamcube", root / "outputs")
+
+            self.assertEqual(instance._resolve_node_id({}), gen.PANORAMA_NODE_ID)
+            self.assertEqual(
+                instance._resolve_node_id({"output_format": "glb"}),
+                gen.SCENE_NODE_ID,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -564,46 +576,89 @@ class DreamCubeMeshGeneratorIntegrationTests(unittest.TestCase):
             flipped_cube[..., :2] *= -1
             self.assertFalse(torch.allclose(cube_3dgs_rays, flipped_cube))
 
-    def test_glb_conversion_loads_obj_without_processing_and_exports_materialized_file(self):
+    def test_glb_conversion_sets_mode_specific_pbr_material_and_exports_file(self):
         import numpy as np
 
         gen = self.generator
+        for mode, expected_double_sided in (
+            ('cubemap', False),
+            ('equirectangular', True),
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp_dir:
+                instance = gen.DreamCubeGenerator(Path(temp_dir) / 'models', Path(temp_dir) / 'outputs')
+                calls: dict[str, object] = {}
+
+                class FakeMesh:
+                    def __init__(self):
+                        self.visual = types.SimpleNamespace(material=None)
+
+                    @property
+                    def vertex_normals(self):
+                        calls['normals_requested'] = True
+                        return np.zeros((3, 3))
+
+                    def export(self, path):
+                        calls['export_path'] = path
+                        Path(path).write_bytes(b'glb')
+
+                class FakePBRMaterial:
+                    def __init__(self, **kwargs):
+                        calls['material_kwargs'] = kwargs
+
+                fake_mesh = FakeMesh()
+                fake_trimesh = types.SimpleNamespace(
+                    load=lambda *args, **kwargs: (calls.__setitem__('load', (args, kwargs)) or fake_mesh),
+                    visual=types.SimpleNamespace(material=types.SimpleNamespace(PBRMaterial=FakePBRMaterial)),
+                )
+                obj_path = Path(temp_dir) / 'output_mesh.obj'
+                glb_path = Path(temp_dir) / 'output_mesh.glb'
+                obj_path.write_text('v 0 0 0 1 0 0\nf 1 1 1\n', encoding='utf-8')
+
+                with mock.patch.dict(sys.modules, {'trimesh': fake_trimesh}):
+                    result = instance._convert_obj_to_glb(obj_path, glb_path, self.mesh_stats(mode))
+
+                self.assertEqual(result, glb_path)
+                load_args, load_kwargs = calls['load']
+                self.assertEqual(load_args, (str(obj_path),))
+                self.assertEqual(load_kwargs, {'force': 'mesh', 'process': False, 'maintain_order': True})
+                self.assertEqual(calls['material_kwargs'], {'doubleSided': expected_double_sided})
+                self.assertIsInstance(fake_mesh.visual.material, FakePBRMaterial)
+                self.assertTrue(calls['normals_requested'])
+
+    def test_glb_material_failure_is_required_and_diagnostic(self):
+        gen = self.generator
         with tempfile.TemporaryDirectory() as temp_dir:
-            instance = gen.DreamCubeGenerator(Path(temp_dir) / 'models', Path(temp_dir) / 'outputs')
-            calls: dict[str, object] = {}
-
-            class FakeMesh:
-                @property
-                def vertex_normals(self):
-                    calls['normals_requested'] = True
-                    return np.zeros((3, 3))
-
-                def export(self, path):
-                    calls['export_path'] = path
-                    Path(path).write_bytes(b'glb')
-
-            class FakePBRMaterial:
-                def __init__(self, **kwargs):
-                    calls['material_kwargs'] = kwargs
-
-            fake_mesh = FakeMesh()
-            fake_trimesh = types.SimpleNamespace(
-                load=lambda *args, **kwargs: (calls.__setitem__('load', (args, kwargs)) or fake_mesh),
-                visual=types.SimpleNamespace(material=types.SimpleNamespace(PBRMaterial=FakePBRMaterial)),
+            root = Path(temp_dir)
+            instance = gen.DreamCubeGenerator(root / 'models', root / 'outputs')
+            obj_path = root / 'output_mesh.obj'
+            glb_path = root / 'output_mesh.glb'
+            obj_path.write_text('v 0 0 0\n', encoding='utf-8')
+            export = mock.Mock(side_effect=lambda path: Path(path).write_bytes(b'glb'))
+            fake_mesh = types.SimpleNamespace(
+                vertex_normals=(),
+                visual=types.SimpleNamespace(material=None),
+                export=export,
             )
-            obj_path = Path(temp_dir) / 'output_mesh.obj'
-            glb_path = Path(temp_dir) / 'output_mesh.glb'
-            obj_path.write_text('v 0 0 0 1 0 0\nf 1 1 1\n', encoding='utf-8')
+            fake_trimesh = types.SimpleNamespace(
+                load=mock.Mock(return_value=fake_mesh),
+                visual=types.SimpleNamespace(
+                    material=types.SimpleNamespace(
+                        PBRMaterial=mock.Mock(side_effect=RuntimeError('bad material'))
+                    )
+                ),
+            )
 
-            with mock.patch.dict(sys.modules, {'trimesh': fake_trimesh}):
-                result = instance._convert_obj_to_glb(obj_path, glb_path, self.mesh_stats('cubemap'))
+            with mock.patch.dict(sys.modules, {'trimesh': fake_trimesh}), \
+                 mock.patch.object(gen, '_log') as log, \
+                 self.assertRaises(gen.SceneGenerationError) as raised:
+                instance._convert_obj_to_glb(obj_path, glb_path, self.mesh_stats('cubemap'))
 
-            self.assertEqual(result, glb_path)
-            load_args, load_kwargs = calls['load']
-            self.assertEqual(load_args, (str(obj_path),))
-            self.assertEqual(load_kwargs, {'force': 'mesh', 'process': False, 'maintain_order': True})
-            self.assertEqual(calls['material_kwargs'], {'doubleSided': True})
-            self.assertTrue(calls['normals_requested'])
+            self.assertEqual(raised.exception.stage, 'glb_conversion')
+            self.assertIn('bad material', str(raised.exception))
+            self.assertEqual(raised.exception.stats['mode'], 'cubemap')
+            self.assertFalse(raised.exception.diagnostics['glb_exists'])
+            export.assert_not_called()
+            log.assert_called_once()
 
     def test_glb_conversion_error_is_required_and_diagnostic(self):
         gen = self.generator
@@ -766,7 +821,7 @@ class DreamCubeMeshGeneratorIntegrationTests(unittest.TestCase):
                 self.assertIn('WORKSPACE_DIR', str(raised.exception))
                 self.assertFalse((run_dir / 'scene-manifest.json').exists())
 
-    def test_scene_returns_manifest_and_records_glb_coordinate_and_presentation_metadata(self):
+    def test_scene_returns_glb_and_records_scene_manifest_sidecar_metadata(self):
         gen = self.generator
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -809,12 +864,25 @@ class DreamCubeMeshGeneratorIntegrationTests(unittest.TestCase):
                  mock.patch.object(instance, '_export_scene', side_effect=export):
                 result = instance.generate(tiny_png_bytes(), params)
 
-            self.assertEqual(result.name, 'scene-manifest.json')
-            manifest = json.loads(result.read_text(encoding='utf-8'))
+            self.assertEqual(result.name, 'output_mesh.glb')
+            self.assertTrue(result.is_absolute())
+            manifest_path = result.parent / 'scene-manifest.json'
+            self.assertTrue(manifest_path.is_file())
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            self.assertEqual(manifest['schema'], 'modly.scene-manifest.v1')
             self.assertEqual(manifest['assets'][0]['workspacePath'], f'outputs/{result.parent.name}/output_mesh.glb')
             metadata = json.loads((result.parent / 'run_metadata.json').read_text(encoding='utf-8'))
             self.assertEqual(metadata['output_format'], 'glb')
+            self.assertEqual(metadata['primary_output'], {
+                'status': 'success',
+                'format': 'glb',
+                'path': 'output_mesh.glb',
+            })
             self.assertEqual(metadata['mesh_export']['status'], 'success')
+            self.assertEqual(metadata['scene_manifest'], {
+                'status': 'success',
+                'path': 'scene-manifest.json',
+            })
             self.assertEqual(metadata['mesh_export']['stats']['mode'], 'cubemap')
             self.assertEqual(metadata['reconstruction']['max_cube_size'], 128)
             self.assertEqual(metadata['reconstruction']['mesh_depth_jump_threshold'], 0.35)

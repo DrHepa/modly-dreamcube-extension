@@ -29,6 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 UPSTREAM_REPO_URL = "https://github.com/Yukun-Huang/DreamCube.git"
 UPSTREAM_REF = "main"
+UPSTREAM_COMMIT = "aa04a53c6542581b5b0a6faa575865d2d57b5243"
 UPSTREAM_RELATIVE_PATH = Path(".modly") / "upstream" / "DreamCube"
 
 HF_REPO = "KevinHuang/DreamCube"
@@ -45,7 +46,7 @@ LOG_RELATIVE_PATH = SETUP_RELATIVE_PATH / "logs" / "setup.log"
 
 BOOTSTRAP_PACKAGES = ["pip", "setuptools", "wheel", "huggingface_hub>=0.24,<1.0"]
 PYTORCH3D_UPSTREAM_PACKAGE = "pytorch3d" + "==0.7.8"
-PYTORCH3D_SOURCE_URL = "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+PYTORCH3D_SOURCE_URL = "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8"
 PYTORCH3D_MODES = {"auto", "source", "shim", "required"}
 OPEN3D_PACKAGE = "open3d"
 OPEN3D_DOCS_WHEEL_INDEX = "https://www.open3d.org/docs/latest/getting_started.html"
@@ -208,7 +209,7 @@ class StatusTracker:
             "python_exe": config.python_exe,
             "upstream_repo": UPSTREAM_REPO_URL,
             "upstream_ref": UPSTREAM_REF,
-            "upstream_commit": None,
+            "upstream_commit": UPSTREAM_COMMIT,
             "hf_repo": HF_REPO,
             "download_check": DOWNLOAD_CHECK,
             "model_dir": str(config.model_dir),
@@ -519,7 +520,7 @@ def run_command(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     code: str = "command-failed",
-    check: bool = True,
+    check=True,
 ) -> subprocess.CompletedProcess[str]:
     merged_env = dict(os.environ)
     if env:
@@ -554,7 +555,10 @@ def run_command(
     return_code = process.wait()
     stdout = "\n".join(output_lines)
     if check and return_code != 0:
-        raise SetupError(f"Command failed with exit code {return_code}: {command_text}", code=code)
+        raise SetupError(
+            f"Command failed with exit code {return_code}: {command_text}",
+            code=code,
+        )
     return subprocess.CompletedProcess([str(part) for part in cmd], return_code, stdout, None)
 
 
@@ -608,7 +612,7 @@ def validate_internal_config(config: SetupConfig) -> dict[str, Any]:
     if not UPSTREAM_DEPENDENCIES:
         raise SetupError("No upstream dependency list configured", code="invalid-config")
 
-    required_payloads = ("manifest.json", "generator.py", "dreamcube_mesh.py")
+    required_payloads = ("manifest.json", "generator.py", "dreamcube_mesh.py", "dreamcube_manual_cubemap.py")
     missing_payloads = [name for name in required_payloads if not (SCRIPT_DIR / name).is_file()]
     if missing_payloads:
         raise SetupError(
@@ -630,6 +634,20 @@ def validate_internal_config(config: SetupConfig) -> dict[str, Any]:
         raise SetupError(f"manifest hf_repo must be {HF_REPO!r}", code="invalid-manifest")
     if manifest.get("download_check") != DOWNLOAD_CHECK:
         raise SetupError(f"manifest download_check must be {DOWNLOAD_CHECK!r}", code="invalid-manifest")
+
+    upstream_source = (
+        manifest.get("setup", {})
+        .get("managed_runtime_cache", {})
+        .get("upstream_source", {})
+        if isinstance(manifest.get("setup"), dict)
+        else {}
+    )
+    if upstream_source.get("repo_url") != UPSTREAM_REPO_URL:
+        raise SetupError("manifest upstream_source repo_url must match setup.py", code="invalid-manifest")
+    if upstream_source.get("ref") != UPSTREAM_REF:
+        raise SetupError("manifest upstream_source ref must match setup.py", code="invalid-manifest")
+    if upstream_source.get("commit") != UPSTREAM_COMMIT:
+        raise SetupError("manifest upstream_source commit must match setup.py", code="invalid-manifest")
 
     if PYTORCH3D_UPSTREAM_PACKAGE in UPSTREAM_DEPENDENCIES:
         raise SetupError(
@@ -663,6 +681,9 @@ def validate_internal_config(config: SetupConfig) -> dict[str, Any]:
     return {
         "manifest": str(manifest_path),
         "torch_lane": lane.as_status(),
+        "upstream_repo": UPSTREAM_REPO_URL,
+        "upstream_ref": UPSTREAM_REF,
+        "upstream_commit": UPSTREAM_COMMIT,
         "dependency_count": len(UPSTREAM_DEPENDENCIES),
         "excluded_dependencies": [PYTORCH3D_UPSTREAM_PACKAGE, OPEN3D_PACKAGE],
         "model_dir": str(config.model_dir),
@@ -730,6 +751,29 @@ def bootstrap_venv(py: Path, logger: SetupLogger) -> dict[str, Any]:
     return {"packages": BOOTSTRAP_PACKAGES}
 
 
+def _clone_upstream(upstream_dir: Path, logger: SetupLogger) -> None:
+    run_command(
+        ["git", "clone", "--no-checkout", "--branch", UPSTREAM_REF, "--single-branch", UPSTREAM_REPO_URL, str(upstream_dir)],
+        logger,
+        code="upstream-clone-failed",
+    )
+
+
+def _final_upstream_head(upstream_dir: Path, logger: SetupLogger) -> str:
+    commit = run_command(
+        ["git", "rev-parse", "HEAD"],
+        logger,
+        cwd=upstream_dir,
+        code="upstream-rev-parse-failed",
+    ).stdout.strip().splitlines()[-1]
+    if commit != UPSTREAM_COMMIT:
+        raise SetupError(
+            f"DreamCube checkout is not at pinned commit {UPSTREAM_COMMIT}; got {commit}",
+            code="upstream-pinned-commit-mismatch",
+        )
+    return commit
+
+
 def sync_upstream(config: SetupConfig, logger: SetupLogger) -> dict[str, Any]:
     upstream_dir = config.ext_dir / UPSTREAM_RELATIVE_PATH
     upstream_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -741,24 +785,19 @@ def sync_upstream(config: SetupConfig, logger: SetupLogger) -> dict[str, Any]:
                 f"Upstream path exists but is not a git checkout: {upstream_dir}",
                 code="upstream-path-not-git",
             )
-        run_command(
-            ["git", "clone", "--branch", UPSTREAM_REF, "--single-branch", UPSTREAM_REPO_URL, str(upstream_dir)],
-            logger,
-            code="upstream-clone-failed",
-        )
+        logger.info(f"Creating DreamCube checkout at {upstream_dir}")
+        _clone_upstream(upstream_dir, logger)
     elif git_dir.exists():
-        logger.info(f"Updating existing DreamCube checkout at {upstream_dir}")
+        logger.info(f"Repairing existing DreamCube checkout at {upstream_dir}")
         run_command(["git", "remote", "set-url", "origin", UPSTREAM_REPO_URL], logger, cwd=upstream_dir, code="upstream-update-failed")
         run_command(["git", "fetch", "--prune", "origin", UPSTREAM_REF], logger, cwd=upstream_dir, code="upstream-fetch-failed")
+        run_command(["git", "fetch", "origin", UPSTREAM_COMMIT], logger, cwd=upstream_dir, code="upstream-fetch-failed")
     else:
-        run_command(
-            ["git", "clone", "--branch", UPSTREAM_REF, "--single-branch", UPSTREAM_REPO_URL, str(upstream_dir)],
-            logger,
-            code="upstream-clone-failed",
-        )
+        logger.info(f"Creating DreamCube checkout at {upstream_dir}")
+        _clone_upstream(upstream_dir, logger)
 
-    run_command(["git", "checkout", "-B", UPSTREAM_REF, f"origin/{UPSTREAM_REF}"], logger, cwd=upstream_dir, code="upstream-checkout-failed")
-    commit = run_command(["git", "rev-parse", "HEAD"], logger, cwd=upstream_dir, code="upstream-rev-parse-failed").stdout.strip().splitlines()[-1]
+    run_command(["git", "checkout", "--detach", UPSTREAM_COMMIT], logger, cwd=upstream_dir, code="upstream-checkout-failed")
+    commit = _final_upstream_head(upstream_dir, logger)
     return {"upstream_dir": str(upstream_dir), "ref": UPSTREAM_REF, "commit": commit}
 
 

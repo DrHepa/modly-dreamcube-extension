@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sys
 import tempfile
@@ -31,6 +32,20 @@ class SetupContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.setup = load_setup_module()
+
+    def test_run_command_defaults_to_checked_and_raises_for_failing_child(self):
+        signature = inspect.signature(self.setup.run_command)
+        self.assertIs(signature.parameters["check"].default, True)
+
+        with self.assertRaises(self.setup.SetupError) as ctx:
+            self.setup.run_command(
+                [sys.executable, "-c", "import sys; sys.exit(7)"],
+                mock.Mock(),
+                code="child-command-failed",
+            )
+
+        self.assertEqual(ctx.exception.code, "child-command-failed")
+        self.assertIn("exit code 7", str(ctx.exception))
 
     def test_parse_electron_json_payload(self):
         payload = {
@@ -141,11 +156,108 @@ class SetupContractTests(unittest.TestCase):
         self.assertIn("pillow", {self.setup.dependency_name(package) for package in self.setup.UPSTREAM_DEPENDENCIES})
 
 
+
+    def test_upstream_constants_pin_tested_dreamcube_revision(self):
+        self.assertEqual(self.setup.UPSTREAM_REPO_URL, "https://github.com/Yukun-Huang/DreamCube.git")
+        self.assertEqual(self.setup.UPSTREAM_REF, "main")
+        self.assertEqual(self.setup.UPSTREAM_COMMIT, "aa04a53c6542581b5b0a6faa575865d2d57b5243")
+
+        manifest = json.loads((EXT_DIR / "manifest.json").read_text(encoding="utf-8"))
+        upstream = manifest["setup"]["managed_runtime_cache"]["upstream_source"]
+        self.assertEqual(upstream["repo_url"], self.setup.UPSTREAM_REPO_URL)
+        self.assertEqual(upstream["ref"], self.setup.UPSTREAM_REF)
+        self.assertEqual(upstream["commit"], self.setup.UPSTREAM_COMMIT)
+        self.assertEqual(upstream["pinned_revision"], self.setup.UPSTREAM_COMMIT)
+        self.assertEqual(upstream["checkout"], "detached")
+
+    def test_sync_upstream_fresh_clone_checks_out_pinned_commit_detached(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self.setup.SetupConfig(
+                python_exe=sys.executable,
+                ext_dir=Path(temp_dir),
+                gpu_sm=86,
+                cuda_version=128,
+                model_dir=Path(temp_dir) / "models",
+            )
+            calls = []
+
+            def fake_run(cmd, logger, **kwargs):
+                calls.append((list(cmd), kwargs.get("cwd")))
+                if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                    return self.setup.subprocess.CompletedProcess(cmd, 0, self.setup.UPSTREAM_COMMIT + "\n", None)
+                return self.setup.subprocess.CompletedProcess(cmd, 0, "", None)
+
+            with mock.patch.object(self.setup, "run_command", side_effect=fake_run):
+                details = self.setup.sync_upstream(config, _FakeLogger())
+
+            upstream_dir = Path(temp_dir) / self.setup.UPSTREAM_RELATIVE_PATH
+            self.assertEqual(details["commit"], self.setup.UPSTREAM_COMMIT)
+            self.assertIn((["git", "clone", "--no-checkout", "--branch", "main", "--single-branch", self.setup.UPSTREAM_REPO_URL, str(upstream_dir)], None), calls)
+            self.assertIn((["git", "checkout", "--detach", self.setup.UPSTREAM_COMMIT], upstream_dir), calls)
+            self.assertNotIn((["git", "checkout", "-B", "main", "origin/main"], upstream_dir), calls)
+
+    def test_sync_upstream_existing_checkout_repairs_and_verifies_pinned_head(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            upstream_dir = Path(temp_dir) / self.setup.UPSTREAM_RELATIVE_PATH
+            (upstream_dir / ".git").mkdir(parents=True)
+            config = self.setup.SetupConfig(
+                python_exe=sys.executable,
+                ext_dir=Path(temp_dir),
+                gpu_sm=86,
+                cuda_version=128,
+                model_dir=Path(temp_dir) / "models",
+            )
+            calls = []
+
+            def fake_run(cmd, logger, **kwargs):
+                calls.append((list(cmd), kwargs.get("cwd")))
+                if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                    return self.setup.subprocess.CompletedProcess(cmd, 0, self.setup.UPSTREAM_COMMIT + "\n", None)
+                return self.setup.subprocess.CompletedProcess(cmd, 0, "", None)
+
+            with mock.patch.object(self.setup, "run_command", side_effect=fake_run):
+                details = self.setup.sync_upstream(config, _FakeLogger())
+
+            self.assertEqual(details["commit"], self.setup.UPSTREAM_COMMIT)
+            self.assertIn((["git", "remote", "set-url", "origin", self.setup.UPSTREAM_REPO_URL], upstream_dir), calls)
+            self.assertIn((["git", "fetch", "--prune", "origin", self.setup.UPSTREAM_REF], upstream_dir), calls)
+            self.assertIn((["git", "fetch", "origin", self.setup.UPSTREAM_COMMIT], upstream_dir), calls)
+            self.assertIn((["git", "checkout", "--detach", self.setup.UPSTREAM_COMMIT], upstream_dir), calls)
+
+    def test_sync_upstream_rejects_wrong_final_head(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self.setup.SetupConfig(
+                python_exe=sys.executable,
+                ext_dir=Path(temp_dir),
+                gpu_sm=86,
+                cuda_version=128,
+                model_dir=Path(temp_dir) / "models",
+            )
+
+            def fake_run(cmd, logger, **kwargs):
+                if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+                    return self.setup.subprocess.CompletedProcess(cmd, 0, "0" * 40 + "\n", None)
+                return self.setup.subprocess.CompletedProcess(cmd, 0, "", None)
+
+            with mock.patch.object(self.setup, "run_command", side_effect=fake_run):
+                with self.assertRaises(self.setup.SetupError) as ctx:
+                    self.setup.sync_upstream(config, _FakeLogger())
+
+            self.assertEqual(ctx.exception.code, "upstream-pinned-commit-mismatch")
+
     def test_dependencies_exclude_provider_managed_packages(self):
         self.assertNotIn(self.setup.PYTORCH3D_UPSTREAM_PACKAGE, self.setup.UPSTREAM_DEPENDENCIES)
         self.assertFalse(any(self.setup.dependency_name(package) == self.setup.OPEN3D_PACKAGE for package in self.setup.UPSTREAM_DEPENDENCIES))
         self.assertIn("pytorch3d.transforms", self.setup.PROBE_IMPORTS)
         self.assertIn("open3d", self.setup.PROBE_IMPORTS)
+
+    def test_pytorch3d_source_url_is_immutable_v078_tag(self):
+        self.assertEqual(
+            self.setup.PYTORCH3D_SOURCE_URL,
+            "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.8",
+        )
+        self.assertNotIn("@stable", self.setup.PYTORCH3D_SOURCE_URL)
+
 
     def test_pytorch3d_mode_defaults_and_payload_env_precedence(self):
         base = self.setup.SetupConfig(
@@ -326,7 +438,7 @@ class SetupContractTests(unittest.TestCase):
         text = (
             "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyz "
             "Authorization: Bearer abc.def.ghi "
-            "https://user:password@example.com/path "
+            "https://user:password@secret.invalid/path "
             "api_key=plain-secret"
         )
 
@@ -364,13 +476,16 @@ class MeshPayloadContractTests(unittest.TestCase):
                     self.setup.validate_internal_config(config)
             self.assertEqual(ctx.exception.code, 'missing-extension-payload')
             self.assertIn('dreamcube_mesh.py', str(ctx.exception))
+        self.assertIn('dreamcube_manual_cubemap.py', str(ctx.exception))
 
-    def test_manifest_declares_scene_only_mesh_threshold_and_size_caps(self):
+    def test_manifest_declares_mesh_primary_scene_nodes_and_size_caps(self):
         manifest = json.loads((EXT_DIR / 'manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['source'], 'https://github.com/DrHepa/modly-dreamcube-extension')
         manifest_nodes = {node['id']: node for node in manifest['nodes']}
         nodes = {node['id']: {item['id']: item for item in node['params_schema']} for node in manifest['nodes']}
         scene = nodes['generate-scene']
-        self.assertEqual(manifest_nodes['generate-scene']['output'], 'scene')
+        self.assertEqual(manifest_nodes['generate-scene']['output'], 'mesh')
+        self.assertEqual(manifest_nodes['generate-scene-manual-cubemap']['output'], 'mesh')
         self.assertNotIn('output_format', scene)
         self.assertEqual(manifest_nodes['generate-panorama']['output'], 'image')
         self.assertNotIn('mesh_depth_jump_threshold', nodes['generate-panorama'])
@@ -382,9 +497,14 @@ class MeshPayloadContractTests(unittest.TestCase):
         self.assertTrue(scene['mesh_footprint_ratio_threshold']['advanced'])
         self.assertEqual(scene['mesh_aspect_ratio_threshold']['default'], 10)
         self.assertTrue(scene['mesh_aspect_ratio_threshold']['advanced'])
-        for params in nodes.values():
+        for node_id, params in nodes.items():
             self.assertEqual(params['max_cube_size']['max'], 512)
-            self.assertEqual(params['max_equi_size']['max'], 2048)
+            if node_id != 'generate-scene-manual-cubemap':
+                self.assertEqual(params['max_equi_size']['max'], 2048)
+            else:
+                self.assertEqual(params['max_cube_size']['min'], 256)
+                self.assertNotIn('max_equi_size', params)
+                self.assertNotIn('depth_mode', params)
 
     def test_setup_does_not_add_mesh_as_dependency_or_patch_upstream(self):
         source = SETUP_PATH.read_text(encoding='utf-8')

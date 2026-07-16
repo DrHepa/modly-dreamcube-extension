@@ -46,6 +46,222 @@ class DreamCubeMeshTests(unittest.TestCase):
             0,
         ), topology)
 
+    def test_valid_cubemap_welds_all_known_joins_without_seam_or_corner_faces(self):
+        torch = self.torch
+        size = 4
+        result = mesh.build_rgbd_cube_mesh(
+            torch.ones((6, size, size, 3)) * 255,
+            torch.ones((6, size, size)),
+            device="cpu",
+            depth_jump_threshold=0.2,
+            footprint_ratio_threshold=0,
+            aspect_ratio_threshold=0,
+            face_chunk_size=5,
+        )
+
+        classes = result.stats["triangles"]["classes"]
+        self.assertEqual(classes["face_grid"]["retained"], 12 * (size - 1) ** 2)
+        self.assertEqual(classes["seam_strip"]["retained"], 0)
+        self.assertEqual(classes["corner"]["retained"], 0)
+        self.assertEqual(classes["seam_strip"]["added"], 0)
+        self.assertEqual(classes["corner"]["added"], 0)
+        self.assertEqual(result.stats["welds"]["candidate"], result.stats["welds"]["welded"])
+        self.assertEqual(result.stats["boundary_edges"], 0)
+        self.assertEqual(result.stats["expected_join_segments"], 12 * (size - 1))
+        self.assertEqual(result.stats["join_segment_incidence"], {
+            "0": 0,
+            "1": 0,
+            "2": 12 * (size - 1),
+            "over2": 0,
+        })
+        self.assertEqual(result.stats["boundary_edges_along_cube_joins"], 0)
+        self.assertEqual(result.stats["boundary_edges_touching_cube_joins"], 0)
+        self.assertEqual(result.stats["strictly_internal_boundary_edges"], 0)
+        self.assertEqual(result.stats["nonmanifold_edges"], 0)
+        self.assertEqual(result.stats["incorrectly_oriented_manifold_edges"], 0)
+        self.assertTrue(result.stats["edge_watertight"])
+        self.assertEqual(result.stats["closure_status"], "closed_cube_joins")
+
+    def test_clean_cubemap_face_groups_are_strictly_inward_wound(self):
+        torch = self.torch
+        size = 4
+        result = mesh.build_rgbd_cube_mesh(
+            torch.ones((6, size, size, 3)) * 255,
+            torch.ones((6, size, size)),
+            device="cpu",
+            depth_jump_threshold=0.2,
+            footprint_ratio_threshold=0,
+            aspect_ratio_threshold=0,
+        )
+
+        vertices = torch.as_tensor(result.vertices)
+        triangles = torch.as_tensor(result.triangles)
+        triangle_vertices = vertices[triangles]
+        centroids = triangle_vertices.mean(dim=1)
+        normals = torch.linalg.cross(
+            triangle_vertices[:, 1] - triangle_vertices[:, 0],
+            triangle_vertices[:, 2] - triangle_vertices[:, 0],
+            dim=1,
+        )
+        radial_normal_dots = (normals * centroids).sum(dim=1)
+        face_directions = torch.tensor([
+            [0.0, 0.0, 1.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ])
+        face_groups = (centroids @ face_directions.T).argmax(dim=1)
+        expected_per_face = 2 * (size - 1) ** 2
+
+        self.assertEqual(
+            torch.bincount(face_groups, minlength=6).tolist(),
+            [expected_per_face] * 6,
+        )
+        for face_index, face_name in enumerate(mesh.CUBEMAP_FACE_ORDER):
+            with self.subTest(face=face_name):
+                face_dots = radial_normal_dots[face_groups == face_index]
+                self.assertEqual(int(face_dots.numel()), expected_per_face)
+                self.assertTrue(
+                    bool((face_dots < 0).all()),
+                    f"{face_name} radial normal dots must all be negative; "
+                    f"range=[{float(face_dots.min())}, {float(face_dots.max())}]",
+                )
+
+    def test_prefilter_reconciliation_prevents_a_one_sided_join_rejection(self):
+        torch = self.torch
+        vertices = torch.tensor([
+            [1.00, 0.00, 0.00],
+            [1.00, 0.20, 0.00],
+            [1.00, 0.00, 0.20],
+            [1.00, 0.00, 0.19],
+            [1.00, 0.20, 0.00],
+            [1.00, 0.00, 0.20],
+        ])
+        rays = vertices / torch.linalg.norm(vertices, dim=1, keepdim=True)
+        distance = torch.linalg.norm(vertices, dim=1)
+        _, pre_weld_aspect, _ = mesh._triangle_geometry_metrics(
+            face_vertices=vertices[torch.tensor([[0, 1, 2], [4, 3, 5]])],
+            face_rays=rays[torch.tensor([[0, 1, 2], [4, 3, 5]])],
+            torch=torch,
+        )
+        self.assertLessEqual(float(pre_weld_aspect[0]), 10)
+        self.assertGreater(float(pre_weld_aspect[1]), 10)
+        result = mesh.filter_mesh_topology(
+            vertices=vertices,
+            vertex_colors=torch.ones((6, 3)),
+            distance=distance,
+            triangles=torch.tensor([[0, 1, 2], [4, 3, 5]]),
+            rays=rays,
+            depth_jump_threshold=0.20,
+            footprint_ratio_threshold=12,
+            aspect_ratio_threshold=10,
+            face_chunk_size=1,
+            mode="cubemap",
+            weld_groups=torch.tensor([[0, 3, -1], [1, 4, -1]]),
+            join_segments=torch.tensor([[0, 1]]),
+        )
+
+        self.assertEqual(result.stats["triangles"]["exported"], 2)
+        self.assertEqual(result.stats["join_segment_incidence"], {
+            "0": 0, "1": 0, "2": 1, "over2": 0,
+        })
+        self.assertEqual(result.stats["boundary_edges_along_cube_joins"], 0)
+
+    def test_internal_depth_hole_remains_open_without_added_triangles(self):
+        torch = self.torch
+        size = 5
+        distance = torch.ones((6, size, size))
+        distance[0, 2, 2] = 2.0
+        result = mesh.build_rgbd_cube_mesh(
+            torch.ones((6, size, size, 3)) * 255,
+            distance,
+            device="cpu",
+            depth_jump_threshold=0.2,
+            footprint_ratio_threshold=0,
+            aspect_ratio_threshold=0,
+            face_chunk_size=3,
+        )
+
+        classes = result.stats["triangles"]["classes"]
+        self.assertGreater(classes["face_grid"]["removed"], 0)
+        self.assertEqual(sum(item["added"] for item in classes.values()), 0)
+        self.assertGreater(result.stats["boundary_edges"], 0)
+        self.assertEqual(result.stats["nonmanifold_edges"], 0)
+        self.assertFalse(result.stats["edge_watertight"])
+        self.assertEqual(result.stats["join_segment_incidence"], {
+            "0": 0,
+            "1": 0,
+            "2": 12 * (size - 1),
+            "over2": 0,
+        })
+        self.assertEqual(result.stats["boundary_edges_along_cube_joins"], 0)
+        self.assertEqual(result.stats["boundary_edges_touching_cube_joins"], 0)
+        self.assertGreater(result.stats["strictly_internal_boundary_edges"], 0)
+        self.assertEqual(
+            result.stats["closure_status"],
+            "closed_cube_joins_with_internal_holes",
+        )
+
+    def test_unsafe_cubemap_depth_mismatch_is_skipped_and_reported(self):
+        torch = self.torch
+        size = 4
+        distance = torch.ones((6, size, size))
+        distance[0] = 1.21
+        result = mesh.build_rgbd_cube_mesh(
+            torch.ones((6, size, size, 3)) * 255,
+            distance,
+            device="cpu",
+            depth_jump_threshold=0.2,
+            footprint_ratio_threshold=0,
+            aspect_ratio_threshold=0,
+            face_chunk_size=4,
+        )
+
+        welds = result.stats["welds"]
+        self.assertGreater(welds["skipped_depth_mismatch"], 0)
+        self.assertEqual(welds["candidate"], sum((
+            welds["welded"],
+            welds["skipped_non_finite_or_invalid"],
+            welds["skipped_repaired"],
+            welds["skipped_unreferenced"],
+            welds["skipped_depth_mismatch"],
+        )))
+        self.assertGreater(result.stats["boundary_edges"], 0)
+        self.assertGreater(
+            result.stats["join_segment_incidence"]["0"]
+            + result.stats["join_segment_incidence"]["1"],
+            0,
+        )
+        self.assertGreater(
+            result.stats["boundary_edges_along_cube_joins"],
+            0,
+        )
+        self.assertTrue(
+            result.stats["closure_status"].startswith("open_cube_joins")
+        )
+        self.assertEqual(result.stats["nonmanifold_edges"], 0)
+
+    def test_cubemap_class_stats_reconcile_with_tiny_chunks(self):
+        torch = self.torch
+        size = 3
+        result = mesh.build_rgbd_cube_mesh(
+            torch.ones((6, size, size, 3)) * 255,
+            torch.ones((6, size, size)),
+            device="cpu",
+            depth_jump_threshold=0.2,
+            footprint_ratio_threshold=0,
+            aspect_ratio_threshold=0,
+            face_chunk_size=1,
+        )
+
+        classes = result.stats["triangles"]["classes"]
+        for item in classes.values():
+            self.assertEqual(item["candidate"] + item["added"], item["retained"] + item["removed"])
+        self.assertEqual(sum(item["retained"] for item in classes.values()), result.stats["triangles"]["exported"])
+        self.assertEqual(sum(item["candidate"] for item in classes.values()), result.stats["triangles"]["candidate"])
+
     def test_equirectangular_topology_wraps_final_column(self):
         topology = {tuple(face) for face in mesh.generate_equirectangular_topology(2, 3).cpu().tolist()}
         self.assertEqual(len(topology), mesh.equirectangular_candidate_triangle_count(2, 3))
@@ -240,6 +456,54 @@ class DreamCubeMeshTests(unittest.TestCase):
         self.assertEqual(stats["caps"], 0)
         self.assertEqual(result.stats["vertices"]["duplicated_for_caps"], 0)
 
+    def test_boundary_quad_reselects_safe_alternate_diagonal(self):
+        torch = self.torch
+        vertices = torch.tensor([
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.4448153, 0.2204748],
+            [1.0, 0.5060700, 0.6707333],
+        ])
+        rays = vertices / torch.linalg.norm(vertices, dim=1, keepdim=True)
+        faces = torch.tensor([[0, 1, 2], [2, 1, 3]])
+        alternate = torch.tensor([[0, 1, 3], [0, 3, 2]])
+        adaptive_stats = {}
+
+        _, existing_aspect, _ = mesh._triangle_geometry_metrics(
+            face_vertices=vertices[faces],
+            face_rays=rays[faces],
+            torch=torch,
+        )
+        _, alternate_aspect, _ = mesh._triangle_geometry_metrics(
+            face_vertices=vertices[alternate],
+            face_rays=rays[alternate],
+            torch=torch,
+        )
+        self.assertGreater(int((existing_aspect > 3).sum()), 0)
+        self.assertTrue(bool((alternate_aspect <= 3).all()))
+
+        selected, adaptive_count = mesh._build_adaptive_faces(
+            faces,
+            torch.tensor([[0, 1, 2, 3]]),
+            torch.linalg.norm(vertices, dim=1),
+            torch.zeros((4,), dtype=torch.bool),
+            0,
+            torch,
+            vertices=vertices,
+            rays=rays,
+            footprint_threshold=0,
+            aspect_threshold=3,
+            join_group_for_vertex=torch.tensor([0, 1, -1, -1]),
+            join_segments=torch.tensor([[0, 1]]),
+            adaptive_stats=adaptive_stats,
+        )
+
+        self.assertTrue(torch.equal(selected, alternate))
+        self.assertEqual(adaptive_count, 1)
+        self.assertEqual(adaptive_stats["boundary_quads_evaluated"], 1)
+        self.assertEqual(adaptive_stats["boundary_diagonal_reselections"], 1)
+        self.assertEqual(adaptive_stats["boundary_quads_unclosable"], 0)
+
     def test_invalid_depth_repair_is_deterministic_and_face_is_rejected(self):
         torch = self.torch
         good_vertices, rays, good_radii = self._front()
@@ -341,7 +605,8 @@ class DreamCubeMeshTests(unittest.TestCase):
         )
         expected_cube = mesh.cubemap_candidate_triangle_count(size)
         self.assertEqual(cube.stats["triangles"]["candidate"], expected_cube)
-        self.assertEqual(cube.stats["triangles"]["exported"], expected_cube)
+        self.assertEqual(cube.stats["triangles"]["exported"], 12 * (size - 1) ** 2)
+        self.assertEqual(cube.stats["triangles"]["candidate"], expected_cube)
         self.assertEqual(cube.stats["closed_topology"]["edge_seams"], 12)
         self.assertEqual(cube.stats["closed_topology"]["corner_triangles"], 8)
 
