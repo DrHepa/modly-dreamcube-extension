@@ -612,7 +612,13 @@ def validate_internal_config(config: SetupConfig) -> dict[str, Any]:
     if not UPSTREAM_DEPENDENCIES:
         raise SetupError("No upstream dependency list configured", code="invalid-config")
 
-    required_payloads = ("manifest.json", "generator.py", "dreamcube_mesh.py", "dreamcube_manual_cubemap.py")
+    required_payloads = (
+        "manifest.json",
+        "generator.py",
+        "dreamcube_mesh.py",
+        "dreamcube_manual_cubemap.py",
+        "dreamcube_cubemap_depth.py",
+    )
     missing_payloads = [name for name in required_payloads if not (SCRIPT_DIR / name).is_file()]
     if missing_payloads:
         raise SetupError(

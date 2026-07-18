@@ -157,6 +157,27 @@ class SetupContractTests(unittest.TestCase):
 
 
 
+    def test_depth_node_declares_exact_optional_rgb_path_pickers(self):
+        manifest = json.loads((EXT_DIR / "manifest.json").read_text(encoding="utf-8"))
+        node = next(item for item in manifest["nodes"] if item["id"] == "estimate-cubemap-depths")
+
+        expected_ids = [
+            "rgb_right_path",
+            "rgb_back_path",
+            "rgb_left_path",
+            "rgb_top_path",
+            "rgb_bottom_path",
+        ]
+        self.assertEqual([param["id"] for param in node["params_schema"]], expected_ids)
+        for param in node["params_schema"]:
+            self.assertEqual(param["type"], "string")
+            self.assertFalse(param["required"])
+            self.assertEqual(param["default"], "")
+            self.assertEqual(param["pickerIntent"], "image")
+            self.assertEqual(param["filters"][0]["name"], "Images")
+            self.assertIn("png", param["filters"][0]["extensions"])
+
+
     def test_upstream_constants_pin_tested_dreamcube_revision(self):
         self.assertEqual(self.setup.UPSTREAM_REPO_URL, "https://github.com/Yukun-Huang/DreamCube.git")
         self.assertEqual(self.setup.UPSTREAM_REF, "main")
@@ -477,6 +498,7 @@ class MeshPayloadContractTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 'missing-extension-payload')
             self.assertIn('dreamcube_mesh.py', str(ctx.exception))
         self.assertIn('dreamcube_manual_cubemap.py', str(ctx.exception))
+        self.assertIn('dreamcube_cubemap_depth.py', str(ctx.exception))
 
     def test_manifest_declares_mesh_primary_scene_nodes_and_size_caps(self):
         manifest = json.loads((EXT_DIR / 'manifest.json').read_text(encoding='utf-8'))
@@ -498,6 +520,9 @@ class MeshPayloadContractTests(unittest.TestCase):
         self.assertEqual(scene['mesh_aspect_ratio_threshold']['default'], 10)
         self.assertTrue(scene['mesh_aspect_ratio_threshold']['advanced'])
         for node_id, params in nodes.items():
+            if node_id == 'estimate-cubemap-depths':
+                self.assertEqual(set(params), {'rgb_right_path', 'rgb_back_path', 'rgb_left_path', 'rgb_top_path', 'rgb_bottom_path'})
+                continue
             self.assertEqual(params['max_cube_size']['max'], 512)
             if node_id != 'generate-scene-manual-cubemap':
                 self.assertEqual(params['max_equi_size']['max'], 2048)

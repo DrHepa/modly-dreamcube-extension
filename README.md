@@ -1,10 +1,10 @@
 # DreamCube for Modly
 
-Independent Modly integration for [DreamCube](https://github.com/Yukun-Huang/DreamCube), maintained by [DrHepa](https://github.com/DrHepa). It accepts a front RGB image, generates or uses a front depth map, runs DreamCube, and returns either an equirectangular panorama or a GLB mesh through Modly jobs; scene manifests are retained as auxiliary sidecars.
+Independent Modly integration for [DreamCube](https://github.com/Yukun-Huang/DreamCube), maintained by [DrHepa](https://github.com/DrHepa). It accepts a front RGB image, generates or uses a front depth map, estimates sparse cubemap depth, runs DreamCube when requested, and returns images or a GLB mesh through Modly jobs; scene manifests are retained as auxiliary sidecars.
 
-This repository is the Modly extension, not the official DreamCube project. DreamCube source code and model weights remain third-party assets owned and licensed by their respective authors.
+This repository is the Modly extension, not the official DreamCube project. DreamCube source code and model weights remain separate third-party assets. The pinned upstream source does not declare a source-code license; the model repositories declare their own weight licenses.
 
-**Current extension version:** `0.2.0`
+**Current extension version:** `0.3.0`
 
 ## Features
 
@@ -12,6 +12,7 @@ This repository is the Modly extension, not the official DreamCube project. Drea
 | --- | --- | --- |
 | `dreamcube/generate-panorama` | PNG image | Generate an equirectangular RGB panorama. |
 | `dreamcube/generate-scene` | GLB mesh | Generate a navigable mesh; `scene-manifest.json`, OBJ, 3DGS splat, and RGB-D files remain sidecars. |
+| `dreamcube/estimate-cubemap-depths` | `front_depth.png` (primary) + sidecars | Estimate non-metric radial-depth from supplied cubemap RGB faces; output includes the front primary image and additional face/depth sidecars in the run folder. |
 | `dreamcube/generate-scene-manual-cubemap` | GLB mesh | Generate a mesh from six supplied RGB faces and six paired 16-bit radial-depth PNG faces; retain `scene-manifest.json` as a sidecar. |
 
 - Internal auto-depth by default using Depth Anything V2 Small.
@@ -32,9 +33,9 @@ The currently validated development lane is Linux ARM64 with Python 3.12 and NVI
 1. Open Modly's extension manager and choose **Install from GitHub**.
 2. Use `https://github.com/DrHepa/modly-dreamcube-extension` as the repository URL.
 3. Wait for the extension setup to finish and inspect the setup log if Modly reports a partial or failed installation.
-4. Download the DreamCube weights from Modly's model UI before the first generation.
+4. Download the DreamCube weights from Modly's model UI before using panorama or scene nodes. The cubemap-depth node does not require them.
 
-For local development, clone or copy the repository into Modly's extensions directory and reload the extension. Keep `manifest.json`, `setup.py`, `generator.py`, `dreamcube_mesh.py`, `dreamcube_manual_cubemap.py`, `README.md`, and `LICENSE` together.
+For local development, clone or copy the repository into Modly's extensions directory and reload the extension. Keep `manifest.json`, `setup.py`, `generator.py`, `dreamcube_mesh.py`, `dreamcube_manual_cubemap.py`, `dreamcube_cubemap_depth.py`, `README.md`, and `LICENSE` together.
 
 `setup.py` prepares the extension runtime: it creates or reuses an extension-local environment, clones or repairs DreamCube upstream source into `.modly/upstream/DreamCube`, checks out pinned commit `aa04a53c6542581b5b0a6faa575865d2d57b5243` detached, installs runtime dependencies, records setup evidence, and validates core imports before marking the extension ready.
 
@@ -43,7 +44,7 @@ Setup evidence is written to:
 - `.modly/setup/setup-status.json`
 - `.modly/setup/logs/setup.log`
 
-No Gradio server is launched; all execution happens through Modly jobs.
+No Gradio server is launched; all execution happens through Modly jobs. Setup is dependency-only: it never downloads DreamCube or Depth Anything model weights.
 
 ## Model weights
 
@@ -66,6 +67,8 @@ By default, `depth_mode=auto` generates the front depth map inside this extensio
 Auto-depth weights are not downloaded during setup. They are cached lazily by Transformers the first time auto-depth generation is used. This extension has no dependency on a separate `modly-depth-anything` extension.
 
 If `depth_image_path` is provided while `depth_mode=auto`, the supplied depth image is used instead of generating auto-depth. If `depth_mode=manual`, `depth_image_path` is required.
+
+The same lazy model and cache are reused by `dreamcube/estimate-cubemap-depths`. That node does not require DreamCube weights and never loads the DreamCube pipeline.
 
 ## Usage
 
@@ -101,9 +104,35 @@ The scene output contract is strict:
 - The initial view starts at the RGB-D camera origin and looks along +Z with +Y up.
 
 
+### Estimate cubemap depths
+
+Run `dreamcube/estimate-cubemap-depths` with a required front RGB image input and optional cubemap face RGB pickers.
+
+Input contract:
+
+- `front` RGB input is required and always used as the first face.
+- `rgb_right_path`, `rgb_back_path`, `rgb_left_path`, `rgb_top_path`, `rgb_bottom_path` are optional image pickers.
+- Any front-containing subset is accepted (for example, `front`, `front+right`, `front+right+left`, etc. up to all six faces), and inference runs only for supplied faces.
+
+Output contract:
+
+- The single primary Modly result is `front_depth.png`.
+- Every other supplied depth map, together with `depth-estimation.json`, is written as sidecars in the same run folder.
+- Missing faces are never synthesized.
+
+This contract preserves joint postprocessing and returns grayscale uint16 radial-depth images. It remains non-metric and includes the same quality limitations as before.
+
+Depth Anything V2 Small predicts relative depth, not calibrated geometry. The extension replaces non-finite values, jointly normalizes all supplied predictions, fits positive affine alignment only within connected components of the observed cube-face adjacency graph, uses the front face as gauge when available, maps the global estimated z range to 1000..5000 mm, converts 90-degree z-distance to radial distance, and makes only observed shared borders and corners exactly equal. Files are grayscale uint16 PNG radial-millimetre encodings, but the values remain explicitly estimated and non-metric.
+
+Quality is limited by monocular ambiguity, independent per-face inference, textureless or reflective regions, occlusion, and missing adjacency. Disconnected subsets such as `front+back` are marked degraded because no observed shared edge can align their components. No missing face is synthesized.
+
 ### Generate scene from a manual RGB-D cubemap
 
-Run `dreamcube/generate-scene-manual-cubemap` when you already have a complete cubemap. The front RGB face is the normal Modly image input. The other five RGB faces are required picker parameters: `rgb_right_path`, `rgb_back_path`, `rgb_left_path`, `rgb_top_path`, and `rgb_bottom_path`. All six depth faces are required: `depth_front_path`, `depth_right_path`, `depth_back_path`, `depth_left_path`, `depth_top_path`, and `depth_bottom_path`.
+Run `dreamcube/generate-scene-manual-cubemap` when you have a complete cubemap. The manual workflow keeps one required front normal image input, five required RGB image pickers (`rgb_right_path`, `rgb_back_path`, `rgb_left_path`, `rgb_top_path`, `rgb_bottom_path`), and six required depth pickers (`depth_front_path` through `depth_bottom_path`). After the depth node runs, select `front_depth.png` and the optional face-depth sidecars from that run folder with the manual node's depth path pickers.
+
+Generation requires all six RGB faces and all six depth faces. The front RGB remains the required primary image input; every other RGB face and all six depth faces are supplied through the path pickers.
+
+> **Depth quality directly affects the final mesh.** The manual node requires six matched RGB/depth pairs: every depth map must be geometrically aligned with its RGB face, and all six pairs must share the same cubemap camera origin, orientation, and metric scale. More accurate, clean, and cross-face-consistent depth generally produces more coherent geometry. Noisy, blurred, incorrectly scaled, RGB-misaligned, or mutually inconsistent depth can warp surfaces, enlarge gaps at face joins, or cause unsafe triangles to be discarded even when the RGB images look correct. The node does not run auto-depth to repair or replace the supplied depth maps.
 
 Manual cubemap contract:
 
@@ -131,7 +160,8 @@ Each successful scene run records the GLB primary output, `scene-manifest.json` 
 
 - `dreamcube/generate-panorama` returns an equirectangular RGB PNG.
 - `dreamcube/generate-scene` returns `output_mesh.glb` as the primary Modly mesh output. `scene-manifest.json`, OBJ, 3DGS splat, and RGB-D files remain sidecars in the same run directory.
-- `dreamcube/generate-scene-manual-cubemap` returns `output_mesh.glb` from supplied RGB-D cubemap faces and keeps deterministic input/output face sidecars plus the scene manifest.
+- `dreamcube/estimate-cubemap-depths` returns `front_depth.png` as the primary Modly image output, with all other supplied face depths and `depth-estimation.json` as run-folder sidecars; outputs remain estimated relative radial-depth encodings and are not metric measurements.
+- `dreamcube/generate-scene-manual-cubemap` returns `output_mesh.glb` from supplied RGB-D cubemap faces; deterministic input/output face files and `scene-manifest.json` remain sidecars/resources.
 
 ## Validation
 
@@ -148,29 +178,32 @@ python3 setup.py --validate-only
 
 - Practical generation requires a CUDA/PyTorch-compatible NVIDIA GPU; the currently validated development lane is Linux ARM64 with Python 3.12 and NVIDIA CUDA.
 - Other operating-system, architecture, Python, or GPU lanes are unverified until tested.
-- Setup does not download DreamCube model weights. Auto-depth weights are cached lazily on first auto-depth use.
+- Setup never downloads DreamCube or Depth Anything model weights. Auto-depth weights are cached lazily on first use under `.modly/auto-depth/cache`.
+- Estimated cubemap depth is relative and non-metric; sparse or disconnected face sets have weaker cross-face consistency even after observed-edge alignment.
 - Manual RGB-D cubemap inputs must satisfy the strict face-order, square 90-degree view, and 16-bit radial-depth contracts described above.
 
 ## Troubleshooting
 
 - **Setup fails**: inspect `.modly/setup/logs/setup.log` and `.modly/setup/setup-status.json`.
 - **Weights are missing**: download `KevinHuang/DreamCube` through Modly's model downloader. Setup intentionally does not download these weights.
-- **Auto-depth is slow on first run**: the first auto-depth generation may download and cache `depth-anything/Depth-Anything-V2-Small-hf` under `.modly/auto-depth/cache`.
+- **Auto-depth is slow on first run**: the first panorama, scene, or cubemap-depth request that needs auto-depth may download and cache `depth-anything/Depth-Anything-V2-Small-hf` under `.modly/auto-depth/cache`.
 - **Manual depth fails**: for generated nodes, provide a valid front-view depth image in `depth_image_path`, or switch `depth_mode` back to `auto`. For the manual cubemap node, provide six single-channel 16-bit PNG radial-depth faces with matching square dimensions.
 - **No web UI appears**: expected. This extension does not launch Gradio.
 
 ## Credits
 
 - Extension/wrapper author: DrHepa.
-- DreamCube upstream project: Yukun Huang and DreamCube contributors, <https://github.com/Yukun-Huang/DreamCube>, pinned to `aa04a53c6542581b5b0a6faa575865d2d57b5243` and licensed Apache-2.0.
-- DreamCube model weights: `KevinHuang/DreamCube`, licensed Apache-2.0 by the upstream/model authors.
+- DreamCube upstream source: Yukun Huang and DreamCube contributors, <https://github.com/Yukun-Huang/DreamCube>, pinned to `aa04a53c6542581b5b0a6faa575865d2d57b5243`; source-code license not declared (`NOASSERTION`). The repository and pinned checkout contain no `LICENSE` file or other source-license grant as verified on 2026-07-16.
+- DreamCube model weights: `KevinHuang/DreamCube`; its model repository declares Apache-2.0 for the weights.
+- Depth Anything V2 Small model: `depth-anything/Depth-Anything-V2-Small-hf`, declared Apache-2.0 by its model repository.
 - Host application/project: Modly by Lightning Pixel.
 
 ## License and third-party notices
 
-The Modly wrapper code in this repository is copyright DrHepa and released under the MIT License. See [LICENSE](LICENSE). Third-party licensing is documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The Modly wrapper code in this repository is copyright DrHepa and released under the MIT License. See [LICENSE](LICENSE). That MIT license applies only to the wrapper and does not relicense DreamCube source code or model weights. Third-party licensing is documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-DreamCube upstream source and the `KevinHuang/DreamCube` model weights are separate third-party assets licensed under Apache-2.0 by their respective authors. See:
+The pinned DreamCube upstream source has no declared source-code license and is recorded as `NOASSERTION`. Separately, the `KevinHuang/DreamCube` and `depth-anything/Depth-Anything-V2-Small-hf` model repositories each declare Apache-2.0 for their weights. Those weight-license declarations do not establish a license for DreamCube source code. See:
 
 - <https://github.com/Yukun-Huang/DreamCube>
 - <https://huggingface.co/KevinHuang/DreamCube>
+- <https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf>

@@ -18,34 +18,31 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 try:
-    from services.generators.base import BaseGenerator, GenerationCancelled
-except ModuleNotFoundError:  # pragma: no cover - standalone tests run outside Modly
+    from services.generators.base import (
+        BaseGenerator,
+        GenerationCancelled,
+    )
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - standalone tests run outside Modly runtime
     class GenerationCancelled(Exception):
         """Fallback cancellation exception used outside the Modly runtime."""
 
-    class BaseGenerator:  # type: ignore[override]
-        MODEL_ID = ""
-        DISPLAY_NAME = ""
-        VRAM_GB = 0
+    class BaseGenerator:
+        """Minimal standalone fallback used by source tests outside Modly."""
 
         def __init__(self, model_dir: Path | str, outputs_dir: Path | str) -> None:
             self.model_dir = Path(model_dir)
             self.outputs_dir = Path(outputs_dir)
-            self._model = None
-            self.hf_repo = ""
-            self.hf_skip_prefixes: list[str] = []
-            self.download_check = ""
-            self._params_schema: list[dict[str, Any]] = []
+            self.download_check: str | None = None
+            self.hf_repo: str | None = None
+            self._model: Any | None = None
+
+        def is_loaded(self) -> bool:
+            return self._model is not None
 
         def is_downloaded(self) -> bool:
-            if self.download_check:
-                return (self.model_dir / self.download_check).exists()
-            return self.model_dir.exists() and any(self.model_dir.iterdir())
-
-        def _check_cancelled(self, cancel_event: Any | None) -> None:
-            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
-                raise GenerationCancelled()
-
+            if not self.download_check:
+                return True
+            return (self.model_dir / self.download_check).exists()
 
 EXTENSION_DIR = Path(__file__).resolve().parent
 if str(EXTENSION_DIR) not in sys.path:
@@ -53,6 +50,7 @@ if str(EXTENSION_DIR) not in sys.path:
 
 import dreamcube_mesh
 import dreamcube_manual_cubemap
+import dreamcube_cubemap_depth
 
 MANIFEST_PATH = EXTENSION_DIR / "manifest.json"
 SETUP_STATUS_PATH = EXTENSION_DIR / ".modly" / "setup" / "setup-status.json"
@@ -73,8 +71,13 @@ AUTO_DEPTH_CACHE_DIR = EXTENSION_DIR / ".modly" / "auto-depth" / "cache"
 PANORAMA_NODE_ID = "generate-panorama"
 SCENE_NODE_ID = "generate-scene"
 MANUAL_SCENE_NODE_ID = "generate-scene-manual-cubemap"
-NODE_IDS = {PANORAMA_NODE_ID, SCENE_NODE_ID, MANUAL_SCENE_NODE_ID}
-
+CUBEMAP_DEPTH_NODE_ID = "estimate-cubemap-depths"
+NODE_IDS = {
+    PANORAMA_NODE_ID,
+    SCENE_NODE_ID,
+    MANUAL_SCENE_NODE_ID,
+    CUBEMAP_DEPTH_NODE_ID,
+}
 PANO_TO_3D_CUBEMAP = "3D from RGB-D Cubemap"
 PANO_TO_3D_EQUIRECTANGULAR = "3D from RGB-D Equirectangular"
 PANO_TO_3D_MODES = (PANO_TO_3D_CUBEMAP, PANO_TO_3D_EQUIRECTANGULAR)
@@ -379,6 +382,10 @@ def _normalise_node_id(value: Any) -> str | None:
         return SCENE_NODE_ID
     if lowered.endswith("/" + PANORAMA_NODE_ID) or lowered.endswith(":" + PANORAMA_NODE_ID):
         return PANORAMA_NODE_ID
+    if lowered.endswith("/" + CUBEMAP_DEPTH_NODE_ID) or lowered.endswith(":" + CUBEMAP_DEPTH_NODE_ID):
+        return CUBEMAP_DEPTH_NODE_ID
+    if "cubemap-depth" in lowered or "depth-cubemap" in lowered:
+        return CUBEMAP_DEPTH_NODE_ID
     if "manual-cubemap" in lowered or "rgbd-cubemap" in lowered:
         return MANUAL_SCENE_NODE_ID
     if "scene" in lowered or "mesh" in lowered:
@@ -533,14 +540,92 @@ class DreamCubeGenerator(BaseGenerator):
         self._auto_depth_processor: Any | None = None
         self._auto_depth_model: Any | None = None
         self._auto_depth_variant: str | None = None
+        self._depth_node_loaded = False
+
+    def _active_node_id(self) -> str | None:
+        for candidate in (
+            getattr(self, "node_id", None),
+            getattr(self, "model_id", None),
+            self.model_dir.name if isinstance(self.model_dir, Path) else None,
+        ):
+            node_id = _normalise_node_id(candidate)
+            if node_id is not None:
+                return node_id
+        return None
 
     def is_loaded(self) -> bool:
+        if self._active_node_id() == CUBEMAP_DEPTH_NODE_ID:
+            return self._depth_node_loaded
         return self._pipe is not None
 
     def is_downloaded(self) -> bool:
+        if self._active_node_id() == CUBEMAP_DEPTH_NODE_ID:
+            return True
         return (self.model_dir / DOWNLOAD_CHECK).exists()
 
+    def _depth_readiness_status(self) -> dict[str, Any]:
+        status = _read_json_file(SETUP_STATUS_PATH)
+        dependency_names = ("numpy", "PIL", "torch", "transformers")
+        missing_dependencies = [
+            name
+            for name in dependency_names
+            if importlib.util.find_spec(name) is None
+        ]
+        details: dict[str, Any] = {
+            "setup_status_path": str(SETUP_STATUS_PATH),
+            "setup_status": status.get("status") if isinstance(status, dict) else "missing",
+            "venv_dir": str(EXTENSION_DIR / "venv"),
+            "auto_depth_repo": AUTO_DEPTH_VARIANTS[AUTO_DEPTH_DEFAULT_VARIANT]["repo_id"],
+            "auto_depth_cache": str(AUTO_DEPTH_CACHE_DIR),
+            "auto_depth_cache_exists": AUTO_DEPTH_CACHE_DIR.is_dir(),
+            "download_behavior": "lazy first-use transformers cache",
+            "dreamcube_weights_required": False,
+            "dreamcube_pipeline_required": False,
+            "missing_dependencies": missing_dependencies,
+            "readiness_source": "generator.py",
+        }
+        if status is None:
+            return _readiness_result(
+                ok=False,
+                machine_code="setup_status_missing",
+                label_hint="Setup required",
+                reason="DreamCube setup has not prepared the extension dependencies.",
+                details=details,
+            )
+        setup_state = str(status.get("status", "unknown"))
+        if setup_state != "ready":
+            return _readiness_result(
+                ok=False,
+                machine_code=f"setup_{setup_state}",
+                label_hint="Setup incomplete",
+                reason=f"DreamCube dependency setup status is {setup_state!r}.",
+                details=details,
+            )
+        if missing_dependencies:
+            return _readiness_result(
+                ok=False,
+                machine_code="runtime_dependencies_missing",
+                label_hint="Repair setup",
+                reason=(
+                    "Cubemap depth estimation is missing runtime dependencies: "
+                    + ", ".join(missing_dependencies)
+                ),
+                details=details,
+            )
+        return _readiness_result(
+            ok=True,
+            machine_code="ready",
+            label_hint="Ready",
+            reason=(
+                "Depth Anything V2 Small dependencies are ready. Model files are "
+                "downloaded lazily on first use; DreamCube weights are not required."
+            ),
+            details=details,
+        )
+
     def readiness_status(self) -> dict[str, Any]:
+        if self._active_node_id() == CUBEMAP_DEPTH_NODE_ID:
+            return self._depth_readiness_status()
         status = _read_json_file(SETUP_STATUS_PATH)
         upstream_exists = UPSTREAM_APP_PATH.is_file()
         model_index = self.model_dir / DOWNLOAD_CHECK
@@ -666,6 +751,10 @@ class DreamCubeGenerator(BaseGenerator):
         return module
 
     def load(self) -> None:
+        if self._active_node_id() == CUBEMAP_DEPTH_NODE_ID:
+            self._depth_node_loaded = True
+            self._model = self
+            return
         if self._pipe is not None:
             return
         self._validate_runtime_files()
@@ -682,6 +771,7 @@ class DreamCubeGenerator(BaseGenerator):
         self._pipe = None
         self._app = None
         self._model = None
+        self._depth_node_loaded = False
         self._auto_depth_processor = None
         self._auto_depth_model = None
         self._auto_depth_variant = None
@@ -1175,6 +1265,29 @@ class DreamCubeGenerator(BaseGenerator):
         self._auto_depth_variant = variant
         return processor, model
 
+    def _predict_auto_depth_image(self, image: Any, variant: str) -> Any:
+        import numpy as np
+        import torch
+
+        processor, model = self._load_auto_depth(variant)
+        source = image.convert("RGB")
+        target_size = (source.height, source.width)
+        inputs = processor(images=source, return_tensors="pt")
+        device = next(model.parameters()).device
+        inputs = {
+            key: value.to(device) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+        with torch.inference_mode():
+            outputs = model(**inputs)
+            prediction = torch.nn.functional.interpolate(
+                outputs.predicted_depth.unsqueeze(1),
+                size=target_size,
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze()
+        return prediction.detach().float().cpu().numpy().astype(np.float64)
+
     def _save_auto_depth_image(self, image_path: Path, run_dir: Path, variant: str) -> Path:
         """Estimate relative monocular depth and save DreamCube-compatible uint16 depth.
 
@@ -1187,28 +1300,10 @@ class DreamCubeGenerator(BaseGenerator):
         """
 
         import numpy as np
-        import torch
         from PIL import Image
 
-        processor, model = self._load_auto_depth(variant)
         with Image.open(image_path) as source:
-            image = source.convert("RGB")
-            target_size = (image.height, image.width)
-            inputs = processor(images=image, return_tensors="pt")
-
-        device = next(model.parameters()).device
-        inputs = {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
-        with torch.inference_mode():
-            outputs = model(**inputs)
-            prediction = outputs.predicted_depth
-            prediction = torch.nn.functional.interpolate(
-                prediction.unsqueeze(1),
-                size=target_size,
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze()
-
-        depth = prediction.detach().float().cpu().numpy()
+            depth = self._predict_auto_depth_image(source, variant)
         finite = np.isfinite(depth)
         if not finite.any():
             normalized = np.zeros_like(depth, dtype=np.float32)
@@ -1226,6 +1321,143 @@ class DreamCubeGenerator(BaseGenerator):
         Image.fromarray(np.asarray(depth_mm, dtype=np.uint16)).save(depth_path)
         return depth_path
 
+    @staticmethod
+    def _decode_cubemap_depth_inputs(
+        image_bytes: bytes | bytearray | memoryview,
+        params: Mapping[str, Any],
+        outputs_dir: Path,
+    ) -> tuple[dict[str, Any], list[str]]:
+        from PIL import Image
+
+        if not isinstance(image_bytes, (bytes, bytearray, memoryview)) or not image_bytes:
+            raise ValueError("DreamCube cubemap depth estimation requires non-empty front RGB image bytes.")
+
+        images: dict[str, Any] = {}
+        disconnected: list[str] = []
+
+        with Image.open(io.BytesIO(bytes(image_bytes))) as front_image:
+            images["front"] = front_image.convert("RGB").copy()
+
+        expected_size = images["front"].size
+        if expected_size[0] != expected_size[1]:
+            raise ValueError(
+                f"DreamCube cubemap depth estimation requires square RGB faces; front is {expected_size}."
+            )
+
+        for face in dreamcube_manual_cubemap.FACE_ORDER[1:]:
+            param_name = f"rgb_{face}_path"
+            value = params.get(param_name)
+            if not _has_path_value(value):
+                disconnected.append(face)
+                continue
+            face_path = dreamcube_manual_cubemap.resolve_existing_path(value, outputs_dir, label=param_name)
+            try:
+                with Image.open(face_path) as image:
+                    rgb = image.convert("RGB").copy()
+            except Exception as exc:
+                raise ValueError(f"Cubemap depth estimation could not read {param_name}: {face_path}") from exc
+            if rgb.width != rgb.height:
+                raise ValueError(
+                    f"Cubemap depth estimation face {face} must be a square 90-degree face; got {rgb.size}."
+                )
+            if rgb.size != expected_size:
+                raise ValueError(
+                    "All supplied cubemap depth inputs must share one square size; "
+                    f"expected {expected_size}, got {rgb.size} for {face}."
+                )
+            images[face] = rgb
+
+        if "front" not in images:
+            raise ValueError("DreamCube cubemap depth estimation requires the front image input.")
+
+        return images, disconnected
+
+    def _generate_cubemap_depth_outputs(
+        self,
+        image_bytes: bytes,
+        params: Mapping[str, Any],
+        progress_cb: Callable[..., Any] | None,
+        cancel_event: Any | None,
+    ) -> Path:
+        from PIL import Image
+        import numpy as np
+
+        _raise_if_cancelled(cancel_event)
+        images, disconnected_faces = self._decode_cubemap_depth_inputs(
+            image_bytes,
+            params,
+            self.outputs_dir,
+        )
+        _progress(progress_cb, 10, "decode")
+
+        variant = _safe_choice(
+            params.get("auto_depth_variant"),
+            tuple(AUTO_DEPTH_VARIANTS),
+            AUTO_DEPTH_DEFAULT_VARIANT,
+        )
+        output_root = Path(self.outputs_dir).resolve()
+        run_dir = output_root / (
+            "dreamcube-depths-"
+            + datetime.now().strftime("%Y%m%d-%H%M%S")
+            + "-"
+            + uuid.uuid4().hex[:8]
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        predictions: dict[str, Any] = {}
+        supplied_faces = tuple(face for face in dreamcube_manual_cubemap.FACE_ORDER if face in images)
+        total_faces = len(supplied_faces)
+        for index, face in enumerate(supplied_faces):
+            _raise_if_cancelled(cancel_event)
+            start = 12 + int((index / max(total_faces, 1)) * 63)
+            _progress(progress_cb, start, f"estimate-{face}")
+            predictions[face] = self._predict_auto_depth_image(images[face], variant)
+
+        _raise_if_cancelled(cancel_event)
+        _progress(progress_cb, 75, "joint-postprocess")
+        processed = dreamcube_cubemap_depth.postprocess_cubemap_depths(predictions)
+        if processed.metadata["degraded"]:
+            _log("WARNING: " + str(processed.metadata["warning"]))
+
+        metadata_path = run_dir / "depth-estimation.json"
+        metadata_payload = {
+            "created_at": _utc_now(),
+            "node_id": CUBEMAP_DEPTH_NODE_ID,
+            "model": AUTO_DEPTH_VARIANTS[variant],
+            "cache_dir": str(AUTO_DEPTH_CACHE_DIR),
+            "disconnected_faces": disconnected_faces,
+            "omitted_faces": [
+                face for face in dreamcube_manual_cubemap.FACE_ORDER[1:] if face not in images
+            ],
+            "input_disconnected": disconnected_faces,
+            "supplied_faces": list(processed.depths_mm),
+            "postprocess": processed.metadata,
+        }
+        metadata_path.write_text(
+            json.dumps(_json_safe(metadata_payload), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        _raise_if_cancelled(cancel_event)
+        _progress(progress_cb, 90, "save")
+        front_depth: Path | None = None
+        for face in dreamcube_manual_cubemap.FACE_ORDER:
+            if face not in processed.depths_mm:
+                continue
+            file_name = "front_depth.png" if face == "front" else f"{face}_depth.png"
+            depth_path = run_dir / file_name
+            Image.fromarray(np.asarray(processed.depths_mm[face], dtype=np.uint16)).save(depth_path)
+            if face == "front":
+                front_depth = depth_path
+
+        if front_depth is None:
+            raise RuntimeError("DreamCube cubemap depth estimation failed to produce front depth output.")
+
+        if disconnected_faces:
+            _log("WARNING: DreamCube cubemap depth optional faces omitted: " + ", ".join(disconnected_faces))
+
+        _progress(progress_cb, 100, "done")
+        return front_depth.resolve()
 
     def _run_manual_cubemap_inference(
         self,
@@ -1671,6 +1903,13 @@ class DreamCubeGenerator(BaseGenerator):
         _progress(progress_cb, 2, "validate")
         node_id = self._resolve_node_id(safe_params)
         defaults = _schema_defaults(node_id)
+        if node_id == CUBEMAP_DEPTH_NODE_ID:
+            return self._generate_cubemap_depth_outputs(
+                image_bytes,
+                safe_params,
+                progress_cb,
+                cancel_event,
+            )
         if node_id == MANUAL_SCENE_NODE_ID:
             return self._generate_manual_cubemap(image_bytes, safe_params, defaults, progress_cb, cancel_event)
 

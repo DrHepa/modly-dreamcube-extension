@@ -113,6 +113,13 @@ def _png_depth_header(path: Path) -> tuple[int | None, int | None]:
         header = path.read_bytes()[:29]
     except OSError:
         return None, None
+    return _png_depth_header_bytes(header)
+
+
+def _png_depth_header_bytes(
+    data: bytes | bytearray | memoryview,
+) -> tuple[int | None, int | None]:
+    header = bytes(data)[:29]
     if len(header) < 29 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
         return None, None
     return int(header[24]), int(header[25])
@@ -172,10 +179,10 @@ def load_manual_cubemap_inputs(
             )
 
     for face, param_id in DEPTH_PATH_PARAMS.items():
-        path = resolve_existing_path(params.get(param_id), outputs_dir, label=param_id)
-        with Image.open(path) as image:
-            bit_depth = _image_bit_depth(image, path)
-            png_bit_depth, png_color_type = _png_depth_header(path)
+        depth_path = resolve_existing_path(params.get(param_id), outputs_dir, label=param_id)
+        png_bit_depth, png_color_type = _png_depth_header(depth_path)
+        with Image.open(depth_path) as image:
+            bit_depth = _image_bit_depth(image, depth_path)
             bands = image.getbands()
             if png_bit_depth != 16 or png_color_type != 0 or len(bands) != 1:
                 raise ValueError(
@@ -196,7 +203,7 @@ def load_manual_cubemap_inputs(
         stats["faces"].setdefault(face, {})
         stats["faces"][face].update(
             {
-                "depth_source": str(path),
+                "depth_source": str(depth_path),
                 "depth_mode": "I;16",
                 "depth_bit_depth": 16,
                 "depth_size": list(image.size),

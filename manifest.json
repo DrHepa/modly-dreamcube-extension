@@ -3,14 +3,15 @@
   "type": "model",
   "name": "DreamCube",
   "displayName": "DreamCube RGB-D Panorama",
-  "version": "0.2.0",
-  "description": "Modly model extension for DreamCube RGB-D panorama, mesh, 3DGS scene generation, and strict manual six-face RGB-D cubemap scene generation.",
+  "version": "0.3.0",
+  "description": "Modly model extension for DreamCube RGB-D panorama, mesh, 3DGS scene generation, sparse estimated cubemap depth, and strict manual six-face RGB-D cubemap scene generation.",
   "source": "https://github.com/DrHepa/modly-dreamcube-extension",
   "author": "DrHepa",
   "license": {
     "wrapper": "MIT",
-    "upstream": "Apache-2.0",
-    "weights": "Apache-2.0"
+    "upstream": "NOASSERTION",
+    "weights": "Apache-2.0",
+    "auto_depth_weights": "Apache-2.0"
   },
   "generator_class": "DreamCubeGenerator",
   "weight_owner_id": "dreamcube",
@@ -24,7 +25,8 @@
     "rgbd",
     "cubemap",
     "diffusion",
-    "3dgs"
+    "3dgs",
+    "depth-estimation"
   ],
   "docs": {
     "readme": "./README.md",
@@ -68,7 +70,14 @@
         "path": ".modly/auto-depth/cache",
         "managed_by_setup": false,
         "download_behavior": "lazy runtime download by transformers cache when auto depth is first used",
-        "dependency": "internal-to-dreamcube-extension"
+        "dependency": "internal-to-dreamcube-extension",
+        "used_by_nodes": [
+          "generate-panorama",
+          "generate-scene",
+          "estimate-cubemap-depths"
+        ],
+        "depth_semantics": "relative estimated depth; non-metric",
+        "setup_downloads_weights": false
       }
     }
   },
@@ -563,6 +572,126 @@
           "min": -1,
           "max": 2147483647,
           "tooltip": "Seed passed as a torch.Generator to the DreamCube pipeline. Set -1 for pipeline default randomness."
+        }
+      ]
+    },
+    {
+      "id": "estimate-cubemap-depths",
+      "name": "Depth Anything V2 Small Cubemap Depths",
+      "capability_id": "cubemap-to-estimated-depths",
+      "description": "Estimate relative depth for one to six supplied square 90-degree cubemap faces, with front treated as the primary image input, optional RGB side/top/bottom faces processed when supplied, and optional additional estimated depth files returned as sidecars. Front depth is the primary output.",
+      "input": "image",
+      "output": "image",
+      "params_schema": [
+        {
+          "id": "rgb_right_path",
+          "label": "Right RGB Image",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional square 90-degree right cubemap face. Front RGB remains the node's primary image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_back_path",
+          "label": "Back RGB Image",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional square 90-degree back cubemap face. Front RGB remains the node's primary image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_left_path",
+          "label": "Left RGB Image",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional square 90-degree left cubemap face. Front RGB remains the node's primary image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_top_path",
+          "label": "Top RGB Image",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional square 90-degree top cubemap face. Front RGB remains the node's primary image input. Face order is front/right/back/left/top/bottom."
+        },
+        {
+          "id": "rgb_bottom_path",
+          "label": "Bottom RGB Image",
+          "type": "string",
+          "default": "",
+          "required": false,
+          "pickerIntent": "image",
+          "filters": [
+            {
+              "name": "Images",
+              "extensions": [
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "tif",
+                "tiff"
+              ]
+            }
+          ],
+          "tooltip": "Optional square 90-degree bottom cubemap face. Front RGB remains the node's primary image input. Face order is front/right/back/left/top/bottom."
         }
       ]
     },

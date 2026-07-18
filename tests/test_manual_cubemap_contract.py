@@ -231,8 +231,8 @@ class ManualCubemapGeneratorTests(unittest.TestCase):
 
     def test_manifest_version_shared_weights_and_manual_schema(self):
         manifest = json.loads((EXT_DIR / 'manifest.json').read_text())
-        self.assertEqual(manifest['version'], '0.2.0')
-        self.assertEqual(len(manifest['nodes']), 3)
+        self.assertEqual(manifest['version'], '0.3.0')
+        self.assertEqual(len(manifest['nodes']), 4)
         node = next(n for n in manifest['nodes'] if n['id'] == 'generate-scene-manual-cubemap')
         self.assertEqual(node['capability_id'], 'rgbd-cubemap-to-scene')
         self.assertEqual(node['input'], 'image')
@@ -405,7 +405,7 @@ class ManualCubemapGeneratorTests(unittest.TestCase):
             outputs.mkdir()
             instance = gen.DreamCubeGenerator(root / 'model', outputs)
             params = manual_params(root)
-            params['node_id'] = gen.MANUAL_SCENE_NODE_ID
+            instance.node_id = gen.MANUAL_SCENE_NODE_ID
             result_path = outputs / 'run' / 'scene-manifest.json'
             result_path.parent.mkdir()
             with mock.patch.object(instance, '_save_auto_depth_image', side_effect=AssertionError('auto-depth must not run')), \

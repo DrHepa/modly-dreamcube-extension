@@ -39,12 +39,25 @@ GENERATED_COMMON_PARAM_IDS = {
 }
 
 
+ESTIMATE_CUBEMAP_DEPTH_PARAM_IDS = {
+    "rgb_right_path",
+    "rgb_back_path",
+    "rgb_left_path",
+    "rgb_top_path",
+    "rgb_bottom_path",
+}
+
+
 MANUAL_IMAGE_PICKER_IDS = {
     "rgb_right_path",
     "rgb_back_path",
     "rgb_left_path",
     "rgb_top_path",
     "rgb_bottom_path",
+}
+
+
+MANUAL_DEPTH_PICKER_IDS = {
     "depth_front_path",
     "depth_right_path",
     "depth_back_path",
@@ -61,6 +74,12 @@ MANUAL_FORBIDDEN_PARAM_IDS = {
     "pano_to_3d_mode",
     "max_equi_size",
     "output_format",
+}
+
+LEGACY_FORBIDDEN_NODE_KEYS = {
+    "io" + "_" + "contract",
+    "inputs",
+    "outputs",
 }
 
 PROMPT_PARAM_IDS = {
@@ -220,10 +239,21 @@ def validate_common_params(validator: Validator, node_id: str, params: dict[str,
 
 
 def validate_manual_params(validator: Validator, node_id: str, params: dict[str, dict[str, Any]]) -> None:
-    missing_pickers = sorted(MANUAL_IMAGE_PICKER_IDS.difference(params))
-    if missing_pickers:
-        validator.fail(f"nodes[{node_id}].params_schema: missing manual image pickers {', '.join(missing_pickers)}")
+    missing_image_pickers = sorted(MANUAL_IMAGE_PICKER_IDS.difference(params))
+    if missing_image_pickers:
+        validator.fail(f"nodes[{node_id}].params_schema: missing manual image pickers {', '.join(missing_image_pickers)}")
     for param_id in sorted(MANUAL_IMAGE_PICKER_IDS):
+        param = params.get(param_id)
+        if not param:
+            continue
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), "string")
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.required", param.get("required"), True)
+        validator.expect_equal(f"nodes[{node_id}].{param_id}.pickerIntent", param.get("pickerIntent"), "image")
+
+    missing_depth_pickers = sorted(MANUAL_DEPTH_PICKER_IDS.difference(params))
+    if missing_depth_pickers:
+        validator.fail(f"nodes[{node_id}].params_schema: missing manual depth pickers {', '.join(missing_depth_pickers)}")
+    for param_id in sorted(MANUAL_DEPTH_PICKER_IDS):
         param = params.get(param_id)
         if not param:
             continue
@@ -287,9 +317,44 @@ def validate_node(
     validator.expect_equal(f"nodes[{node_id}].input", node.get("input"), expected["input"])
     validator.expect_equal(f"nodes[{node_id}].output", node.get("output"), expected["output"])
     validator.expect_equal(f"nodes[{node_id}].capability_id", node.get("capability_id"), expected["capability_id"])
+
+    face_order = ["front", "right", "back", "left", "top", "bottom"]
+    if node_id == "estimate-cubemap-depths":
+        validator.expect_equal(f"nodes[{node_id}].name", node.get("name"), "Depth Anything V2 Small Cubemap Depths")
+        forbidden_node_keys = sorted(LEGACY_FORBIDDEN_NODE_KEYS.intersection(node))
+        for forbidden_key in forbidden_node_keys:
+            validator.fail(f"nodes[{node_id}].{forbidden_key}: legacy depth node must not declare named I/O metadata")
+        for field in ("weight_owner_id", "hf_repo", "download_check"):
+            if field in node:
+                validator.fail(f"nodes[{node_id}].{field}: depth-only node must not require DreamCube weights")
+
+        params = params_by_id(node, validator, node_id)
+        if not params:
+            return
+        missing_params = sorted(ESTIMATE_CUBEMAP_DEPTH_PARAM_IDS.difference(params))
+        if missing_params:
+            validator.fail(f"nodes[{node_id}].params_schema: missing params {', '.join(missing_params)}")
+        extra_params = sorted(set(params).difference(ESTIMATE_CUBEMAP_DEPTH_PARAM_IDS))
+        if extra_params:
+            validator.fail(f"nodes[{node_id}].params_schema: unexpected params {', '.join(extra_params)}")
+        for param_id in sorted(ESTIMATE_CUBEMAP_DEPTH_PARAM_IDS):
+            param = params[param_id]
+            validator.expect_equal(f"nodes[{node_id}].{param_id}.type", param.get("type"), "string")
+            validator.expect_equal(f"nodes[{node_id}].{param_id}.required", param.get("required"), False)
+            validator.expect_equal(f"nodes[{node_id}].{param_id}.pickerIntent", param.get("pickerIntent"), "image")
+            validator.expect_equal(f"nodes[{node_id}].{param_id}.default", param.get("default"), "")
+            if "filters" not in param or not isinstance(param["filters"], list) or not param["filters"]:
+                validator.fail(f"nodes[{node_id}].{param_id}.filters: expected a non-empty filter list")
+        return
+
     validator.expect_equal(f"nodes[{node_id}].weight_owner_id", node.get("weight_owner_id"), manifest.get("weight_owner_id"))
     validator.expect_equal(f"nodes[{node_id}].hf_repo", node.get("hf_repo"), manifest.get("hf_repo"))
     validator.expect_equal(f"nodes[{node_id}].download_check", node.get("download_check"), manifest.get("download_check"))
+
+    if node_id == "generate-scene-manual-cubemap":
+        forbidden_node_keys = sorted(LEGACY_FORBIDDEN_NODE_KEYS.intersection(node))
+        for forbidden_key in forbidden_node_keys:
+            validator.fail(f"nodes[{node_id}].{forbidden_key}: legacy manual node must not declare named I/O metadata")
 
     params = params_by_id(node, validator, node_id)
     if not params:
@@ -365,6 +430,7 @@ def validate_files(validator: Validator, manifest: dict[str, Any]) -> None:
     required_runtime_payloads = {
         "dreamcube_mesh.py": "extension-owned mesh converter",
         "dreamcube_manual_cubemap.py": "extension-owned manual RGB-D cubemap runtime",
+        "dreamcube_cubemap_depth.py": "extension-owned sparse cubemap depth postprocessor",
     }
     for filename, description in required_runtime_payloads.items():
         if not (ROOT / filename).is_file():
@@ -395,7 +461,7 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
     for key, expected in root_expectations.items():
         validator.expect_equal(key, manifest.get(key), expected)
 
-    validator.expect_equal("version", manifest.get("version"), "0.2.0")
+    validator.expect_equal("version", manifest.get("version"), "0.3.0")
 
     for key in ("name", "displayName", "description"):
         validator.expect_truthy(key, manifest.get(key))
@@ -404,8 +470,14 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
     if not isinstance(license_info, dict):
         validator.fail("license: expected an object")
     else:
-        validator.expect_equal("license.upstream", license_info.get("upstream"), "Apache-2.0")
-        validator.expect_equal("license.weights", license_info.get("weights"), "Apache-2.0")
+        expected_licenses = {
+            "wrapper": "MIT",
+            "upstream": "NOASSERTION",
+            "weights": "Apache-2.0",
+            "auto_depth_weights": "Apache-2.0",
+        }
+        for key, expected in expected_licenses.items():
+            validator.expect_equal(f"license.{key}", license_info.get(key), expected)
 
     setup = manifest.get("setup")
     if not isinstance(setup, dict):
@@ -488,6 +560,14 @@ def validate_manifest(validator: Validator, manifest: dict[str, Any]) -> None:
             "capability_id": "image-depth-to-scene",
             "output_format_required": False,
             "save_all_default": "true",
+        },
+        "estimate-cubemap-depths": {
+            "id": "estimate-cubemap-depths",
+            "input": "image",
+            "output": "image",
+            "capability_id": "cubemap-to-estimated-depths",
+            "output_format_required": False,
+            "save_all_default": "false",
         },
         "generate-scene-manual-cubemap": {
             "id": "generate-scene-manual-cubemap",
